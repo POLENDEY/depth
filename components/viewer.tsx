@@ -48,8 +48,23 @@ export function Viewer({ model, textColor, baseColor }: ViewerProps) {
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
     controls.dampingFactor = 0.08;
+    controls.enablePan = true;
+    controls.screenSpacePanning = true;
+    controls.zoomToCursor = true;
     controls.minDistance = 18;
-    controls.maxDistance = 420;
+    controls.maxDistance = 1600;
+    // Blender: middle-drag orbits, Shift+middle-drag pans, scroll zooms.
+    // Left-drag also orbits, and Shift+left-drag pans, for mice without a middle button.
+    controls.mouseButtons = {
+      LEFT: THREE.MOUSE.ROTATE,
+      MIDDLE: THREE.MOUSE.ROTATE,
+      RIGHT: THREE.MOUSE.PAN,
+    };
+    const blockMiddleClick = (event: MouseEvent) => {
+      if (event.button === 1) event.preventDefault();
+    };
+    renderer.domElement.addEventListener("mousedown", blockMiddleClick);
+    renderer.domElement.addEventListener("auxclick", blockMiddleClick);
 
     scene.add(new THREE.HemisphereLight(0xffffff, 0xd5dbe6, 1.2));
     const key = new THREE.DirectionalLight(0xffffff, 2.35);
@@ -95,6 +110,7 @@ export function Viewer({ model, textColor, baseColor }: ViewerProps) {
     modelRoot.add(baseMesh, textMesh);
 
     let userMoved = false;
+    const framedCenter = new THREE.Vector3();
     const onStart = () => {
       userMoved = true;
     };
@@ -120,11 +136,14 @@ export function Viewer({ model, textColor, baseColor }: ViewerProps) {
         const span = Math.max(size.x, size.y, size.z) * 0.62;
         const distance = Math.max(span / Math.tan(verticalFov / 2), span / Math.tan(horizontalFov / 2));
         camera.position.set(center.x + distance * 0.04, center.y + distance * 0.48, center.z + distance * 0.82);
+        controls.target.copy(center);
       } else {
-        const offset = camera.position.clone().sub(controls.target);
-        camera.position.copy(center).add(offset);
+        const panOffset = controls.target.clone().sub(framedCenter);
+        const viewOffset = camera.position.clone().sub(controls.target);
+        controls.target.copy(center).add(panOffset);
+        camera.position.copy(controls.target).add(viewOffset);
       }
-      controls.target.copy(center);
+      framedCenter.copy(center);
       camera.near = Math.max(0.1, radius / 40);
       camera.far = radius * 50;
       camera.updateProjectionMatrix();
@@ -163,6 +182,8 @@ export function Viewer({ model, textColor, baseColor }: ViewerProps) {
     return () => {
       document.removeEventListener("visibilitychange", onVisibility);
       controls.removeEventListener("start", onStart);
+      renderer.domElement.removeEventListener("mousedown", blockMiddleClick);
+      renderer.domElement.removeEventListener("auxclick", blockMiddleClick);
       observer.disconnect();
       renderer.setAnimationLoop(null);
       controls.dispose();
@@ -204,7 +225,7 @@ export function Viewer({ model, textColor, baseColor }: ViewerProps) {
         ref={hostRef}
         className="absolute inset-0"
         role="img"
-        aria-label="Interactive 3D keychain. Drag to rotate, scroll to zoom, and right-drag to pan."
+        aria-label="Interactive 3D preview. Drag to orbit, Shift and drag to pan, scroll to zoom."
       />
       <button
         type="button"

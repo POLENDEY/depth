@@ -3,12 +3,13 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { Viewer } from "@/components/viewer";
 import { downloadBlob, EXPORT_FORMATS, exportKeychain, slugify, type ExportFormat } from "@/lib/export";
-import { FONTS, fontById, loadFont, type FontId } from "@/lib/fonts";
+import { FontField } from "@/components/font-field";
+import { useFontLibrary } from "@/lib/font-library";
 import { buildKeychain, LIMITS, type HoleSide, type KeychainModel, type KeychainParams } from "@/lib/geometry";
 import { formatSize, fromDisplay, toDisplay, type Unit } from "@/lib/units";
 
 type Settings = KeychainParams & {
-  fontId: FontId;
+  fontId: string;
   textColor: string;
   baseColor: string;
 };
@@ -43,6 +44,7 @@ export function Studio() {
   const [building, setBuilding] = useState(true);
   const [exporting, setExporting] = useState(false);
   const [more, setMore] = useState(false);
+  const fonts = useFontLibrary();
 
   const geometryKey = useMemo(
     () =>
@@ -70,7 +72,7 @@ export function Studio() {
   }, [model]);
 
   useEffect(() => {
-    const params = JSON.parse(geometryKey) as KeychainParams & { fontId: FontId };
+    const params = JSON.parse(geometryKey) as KeychainParams & { fontId: string };
     let cancel = false;
     const timer = window.setTimeout(() => {
       if (!params.text.trim()) {
@@ -83,7 +85,7 @@ export function Studio() {
       setBuilding(true);
       void (async () => {
         try {
-          const font = await loadFont(fontById(params.fontId).file);
+          const font = await fonts.load(params.fontId);
           if (cancel) return;
           const next = buildKeychain(font, params, "preview");
           if (cancel) {
@@ -107,13 +109,13 @@ export function Studio() {
       cancel = true;
       window.clearTimeout(timer);
     };
-  }, [geometryKey]);
+  }, [geometryKey, fonts.load]);
 
   async function onDownload() {
     if (!settings.text.trim()) return;
     setExporting(true);
     try {
-      const font = await loadFont(fontById(settings.fontId).file);
+      const font = await fonts.load(settings.fontId);
       const printModel = buildKeychain(font, settings, "print");
       try {
         const file = await exportKeychain(
@@ -140,7 +142,24 @@ export function Studio() {
     setSettings((current) => ({ ...current, ...partial }));
   }
 
-  const activeFont = fontById(settings.fontId);
+  const activeFamily = fonts.family(settings.fontId);
+
+  async function onImportFont(file: File) {
+    try {
+      const id = await fonts.importFile(file);
+      patch({ fontId: id });
+    } catch (reason) {
+      fonts.setError(reason instanceof Error ? reason.message : "Could not import that font.");
+    }
+  }
+
+  function onDeleteFont(id: string) {
+    const font = fonts.imported.find((entry) => entry.id === id);
+    if (!font) return;
+    if (!window.confirm(`Delete “${font.name}”? Models using it will fall back to Luckiest Guy.`)) return;
+    void fonts.remove(id);
+    if (settings.fontId === id) patch({ fontId: "luckiest-guy" });
+  }
   const visibleModel = settings.text.trim() ? model : null;
   const unitStep = unit === "mm" ? 0.1 : 0.01;
   const sizeLabel = visibleModel
@@ -161,7 +180,7 @@ export function Studio() {
                 {sizeLabel}
               </p>
               {sizeInches ? <p className="text-xs tabular-nums text-zinc-500">{sizeInches}</p> : null}
-              <p className="text-xs text-zinc-400">Drag to rotate · Scroll to zoom</p>
+              <p className="text-xs text-zinc-400">Drag to orbit · Shift+drag to pan · Scroll to zoom</p>
             </div>
             <div className="pointer-events-auto flex items-center justify-end gap-2">
               <label className="sr-only" htmlFor="export-format">
@@ -220,7 +239,7 @@ export function Studio() {
               autoComplete="off"
               spellCheck={false}
               onChange={(event) => patch({ text: event.target.value.slice(0, LIMITS.characters) })}
-              style={{ fontFamily: `"${activeFont.css}", system-ui, sans-serif` }}
+              style={{ fontFamily: `"${activeFamily}", system-ui, sans-serif` }}
               className="h-10 min-w-0 flex-1 rounded-lg border border-[#d7f3e4] bg-[#e7f9ef] px-3 text-base text-zinc-900 outline-none focus:border-[#8ed4ad] focus:bg-[#dff6e8]"
             />
             <button
@@ -248,18 +267,15 @@ export function Studio() {
         </Field>
 
         <Field label="Font" htmlFor="keychain-font">
-          <select
+          <FontField
             id="keychain-font"
-            value={settings.fontId}
-            onChange={(event) => patch({ fontId: event.target.value as FontId })}
-            className="h-10 w-full rounded-lg border border-[#e6e7ec] bg-[#fafafa] px-2 text-sm"
-          >
-            {FONTS.map((font) => (
-              <option key={font.id} value={font.id}>
-                {font.name}
-              </option>
-            ))}
-          </select>
+            fontId={settings.fontId}
+            imported={fonts.imported}
+            error={fonts.error}
+            onChange={(fontId) => patch({ fontId })}
+            onImport={onImportFont}
+            onDelete={onDeleteFont}
+          />
         </Field>
 
         <button

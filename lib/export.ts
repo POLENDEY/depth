@@ -20,6 +20,7 @@ export async function exportKeychain(
   textColor: string,
   baseColor: string,
   name: string,
+  kind = "keychain",
 ) {
   const group = new THREE.Group();
   group.add(meshFrom(model.base, "Base", baseColor));
@@ -32,7 +33,7 @@ export async function exportKeychain(
       const bytes = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength) as ArrayBuffer;
       return {
         blob: new Blob([bytes], { type: "model/stl" }),
-        filename: `${name}-keychain.stl`,
+        filename: `${name}-${kind}.stl`,
       };
     }
 
@@ -41,7 +42,7 @@ export async function exportKeychain(
       const obj = exporter.parse(group);
       return {
         blob: new Blob([obj], { type: "model/obj" }),
-        filename: `${name}-keychain.obj`,
+        filename: `${name}-${kind}.obj`,
       };
     }
 
@@ -53,13 +54,13 @@ export async function exportKeychain(
       const glb = await exporter.parseAsync(exportGroup, { binary: true });
       return {
         blob: new Blob([glb as ArrayBuffer], { type: "model/gltf-binary" }),
-        filename: `${name}-keychain.glb`,
+        filename: `${name}-${kind}.glb`,
       };
     }
 
     return {
       blob: new Blob([build3mf(model, textColor, baseColor, name)], { type: "model/3mf" }),
-      filename: `${name}-keychain.3mf`,
+      filename: `${name}-${kind}.3mf`,
     };
   } finally {
     disposeMaterials(group);

@@ -8,8 +8,8 @@ const geistSans = Geist({
 });
 
 export const metadata: Metadata = {
-  title: "3D keychain generator",
-  description: "Type a name and download a printable 3D keychain as 3MF, STL, OBJ, or GLB.",
+  title: "3D print models",
+  description: "Customize printable 3D models in the browser and download 3MF, STL, OBJ, or GLB.",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {

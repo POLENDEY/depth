@@ -21,8 +21,10 @@ class NodeFileReader {
 globalThis.FileReader = NodeFileReader as unknown as typeof FileReader;
 import opentype from "opentype.js";
 import { unzipSync } from "fflate";
+import { PRODUCTS } from "../lib/catalog";
 import { buildKeychain } from "../lib/geometry";
 import { exportKeychain } from "../lib/export";
+import { assertArticulatedHingeRound, buildProduct } from "../lib/models";
 
 const defaults = {
   text: "PAUL",
@@ -107,6 +109,29 @@ async function main() {
     built.text.dispose();
     built.base.dispose();
   }
+
+  for (const product of PRODUCTS) {
+    if (product.slug === "name-keychain") continue;
+    const built = buildProduct(product.slug, font, product.settings, "preview");
+    if (!Number.isFinite(built.width) || built.width < 5 || built.depth < 0.5) {
+      throw new Error(`${product.slug} has a bad size ${built.width} x ${built.height} x ${built.depth}`);
+    }
+    if (built.text.getAttribute("position").count < 12 || built.base.getAttribute("position").count < 12) {
+      throw new Error(`${product.slug} mesh is empty`);
+    }
+    console.log(
+      product.slug,
+      built.width.toFixed(1),
+      "x",
+      built.height.toFixed(1),
+      "x",
+      built.depth.toFixed(1),
+    );
+    built.text.dispose();
+    built.base.dispose();
+  }
+
+  assertArticulatedHingeRound();
 
   model.text.dispose();
   model.base.dispose();

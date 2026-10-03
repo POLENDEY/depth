@@ -360,12 +360,12 @@ function circlePath(cx: number, cy: number, radius: number, segments: number) {
   return toClipper([circleRing(cx, cy, radius, segments)])[0];
 }
 
-function toClipper(rings: Ring[]): Paths {
+function toClipper(rings: Ring[], scale = SCALE): Paths {
   return rings
     .map((ring) =>
       ring.map((point) => ({
-        X: Math.round(point.x * SCALE),
-        Y: Math.round(point.y * SCALE),
+        X: Math.round(point.x * scale),
+        Y: Math.round(point.y * scale),
       })),
     )
     .filter((path) => path.length >= 3);
@@ -408,17 +408,17 @@ function offsetPaths(paths: Paths, deltaMm: number, arcToleranceMm: number) {
   return solution;
 }
 
-function clean(paths: Paths) {
+function clean(paths: Paths, distanceMm = 0.02, scale = SCALE) {
   if (!paths.length) return paths;
-  return ClipperLib.Clipper.CleanPolygons(paths, 0.02 * SCALE);
+  return ClipperLib.Clipper.CleanPolygons(paths, distanceMm * scale);
 }
 
 function reversePaths(paths: Paths) {
   return paths.map((path) => [...path].reverse());
 }
 
-function pathsToShapes(paths: Paths) {
-  const shapes = exPolygonsToShapes(pathsToTree(paths)).shapes;
+function pathsToShapes(paths: Paths, scale = SCALE) {
+  const shapes = exPolygonsToShapes(pathsToTree(paths), scale).shapes;
   if (!shapes.length) throw new Error("The keychain outline was empty.");
   return shapes;
 }
@@ -436,18 +436,18 @@ function pathsToTree(paths: Paths) {
   return tree;
 }
 
-function exPolygonsToShapes(tree: PolyTree) {
+function exPolygonsToShapes(tree: PolyTree, scale = SCALE) {
   const polygons = ClipperLib.JS.PolyTreeToExPolygons(tree);
   const shapes: THREE.Shape[] = [];
   let holeCount = 0;
   for (const polygon of polygons) {
     if (polygon.outer.length < 3) continue;
-    const shape = new THREE.Shape(toVectors(polygon.outer));
+    const shape = new THREE.Shape(toVectors(polygon.outer, scale));
     for (const hole of polygon.holes) {
       if (hole.length < 3) continue;
-      const area = Math.abs(pathArea(hole)) / (SCALE * SCALE);
+      const area = Math.abs(pathArea(hole)) / (scale * scale);
       if (area < 0.4) continue;
-      shape.holes.push(new THREE.Path(toVectors(hole)));
+      shape.holes.push(new THREE.Path(toVectors(hole, scale)));
       holeCount += 1;
     }
     shapes.push(shape);
@@ -456,19 +456,111 @@ function exPolygonsToShapes(tree: PolyTree) {
   return { shapes, holeCount };
 }
 
-function toVectors(path: Path) {
-  return path.map((point) => new THREE.Vector2(point.X / SCALE, point.Y / SCALE));
+function toVectors(path: Path, scale = SCALE) {
+  return path.map((point) => new THREE.Vector2(point.X / scale, point.Y / scale));
 }
 
-function extrude(shapes: THREE.Shape[], depth: number) {
+function extrude(shapes: THREE.Shape[], depth: number, curveSegments = 1) {
   const geometry = new THREE.ExtrudeGeometry(shapes, {
     depth,
     bevelEnabled: false,
-    curveSegments: 1,
+    curveSegments,
     steps: 1,
   });
   geometry.computeBoundingBox();
   return geometry;
+}
+
+export function extrudeShapes(shapes: THREE.Shape[], depth: number, curveSegments = 8) {
+  if (!(depth > 0)) throw new Error("Thickness has to be greater than zero.");
+  return extrude(shapes, depth, curveSegments);
+}
+
+export function cutShapes(subject: THREE.Shape[], cuts: THREE.Shape[], divisions = 96) {
+  const scale = 100000;
+  const rings = (shape: THREE.Shape) => shapeRings(shape, divisions);
+  const clipper = new ClipperLib.Clipper(0);
+  clipper.AddPaths(toClipper(subject.flatMap(rings), scale), ClipperLib.PolyType.ptSubject, true);
+  clipper.AddPaths(toClipper(cuts.flatMap(rings), scale), ClipperLib.PolyType.ptClip, true);
+  const tree = new ClipperLib.PolyTree();
+  const ok = clipper.Execute(
+    ClipperLib.ClipType.ctDifference,
+    tree,
+    ClipperLib.PolyFillType.pftNonZero,
+    ClipperLib.PolyFillType.pftNonZero,
+  );
+  if (!ok) throw new Error("The recessed detail could not be cut.");
+  return pathsToShapes(clean(ClipperLib.Clipper.PolyTreeToPaths(tree), 0.0002, scale), scale);
+}
+
+function shapeRings(shape: THREE.Shape, divisions: number) {
+  const outer = shape.getPoints(divisions).map((point) => ({ x: point.x, y: point.y }));
+  if (signedArea(outer) < 0) outer.reverse();
+  const holes = shape.holes.map((hole) => {
+    const ring = hole.getPoints(divisions).map((point) => ({ x: point.x, y: point.y }));
+    if (signedArea(ring) > 0) ring.reverse();
+    return ring;
+  });
+  return [outer, ...holes];
+}
+
+export type GlyphLayout = {
+  char: string;
+  shapes: THREE.Shape[];
+  minX: number;
+  minY: number;
+  maxX: number;
+  maxY: number;
+};
+
+export function layoutText(
+  font: Font,
+  raw: string,
+  letterHeight: number,
+  quality: MeshQuality,
+  options?: { tracking?: number; maxChars?: number },
+) {
+  const text = raw.normalize("NFC").slice(0, options?.maxChars ?? MAX_CHARS);
+  if (!text.trim()) throw new Error("Type a name to generate this model.");
+  const settings = QUALITY[quality];
+  const warnings: string[] = [];
+  const missing = missingGlyphs(font, text);
+  if (missing.length) {
+    warnings.push(`This font has no glyph for ${missing.join(" ")}. Those characters were skipped.`);
+  }
+
+  const sample = font.charToGlyph("H");
+  const capUnits = sample.yMax || font.ascender || font.unitsPerEm * 0.7;
+  const fontSize = (letterHeight * font.unitsPerEm) / capUnits;
+  const scale = fontSize / font.unitsPerEm;
+  const tracking = options?.tracking ?? 0;
+  const glyphs: GlyphLayout[] = [];
+  const chars = Array.from(text);
+  let x = 0;
+
+  for (let index = 0; index < chars.length; index += 1) {
+    const char = chars[index];
+    const glyph = font.charToGlyph(char);
+    if (index > 0) x += font.getKerningValue(font.charToGlyph(chars[index - 1]), glyph) * scale;
+    if (char.trim()) {
+      const commands = glyph.getPath(x, 0, fontSize, {}, font).commands;
+      const rings = commandsToRings(commands, settings.maxCurveSteps).filter(
+        (ring) => Math.abs(signedArea(ring)) > 0.12,
+      );
+      if (rings.length) {
+        const paths = clean(unionPaths(toClipper(rings)));
+        if (paths.length) {
+          const shapes = pathsToShapes(paths);
+          const bounds = ringBounds(rings);
+          glyphs.push({ char, shapes, ...bounds });
+        }
+      }
+    }
+    x += (glyph.advanceWidth ?? font.unitsPerEm * 0.5) * scale + tracking;
+  }
+
+  if (!glyphs.length) throw new Error("That text has no printable outlines. Try letters or numbers.");
+  return { shapes: glyphs.flatMap((glyph) => glyph.shapes), glyphs, warnings };
 }
 
 function assertSolid(geometry: THREE.BufferGeometry) {
