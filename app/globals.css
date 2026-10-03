@@ -1,0 +1,82 @@
+@import "tailwindcss";
+
+@font-face {
+  font-family: "Luckiest Guy";
+  src: url("/fonts/luckiest-guy.woff") format("woff");
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Lilita One";
+  src: url("/fonts/lilita-one.ttf") format("truetype");
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Bangers";
+  src: url("/fonts/bangers.ttf") format("truetype");
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Fredoka";
+  src: url("/fonts/fredoka-bold.woff") format("woff");
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Pacifico";
+  src: url("/fonts/pacifico.ttf") format("truetype");
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Nunito";
+  src: url("/fonts/nunito-extrabold.woff") format("woff");
+  font-display: swap;
+}
+
+:root {
+  color-scheme: light;
+  --background: #f4f5f7;
+  --foreground: #1c1d21;
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-geist-sans), system-ui, sans-serif;
+}
+
+.controls {
+  contain: layout style;
+}
+
+.color-swatch {
+  width: 1.75rem;
+  height: 1.75rem;
+  padding: 0;
+  border: 1px solid #e4e5ea;
+  border-radius: 0.4rem;
+  background: transparent;
+  cursor: pointer;
+  appearance: none;
+}
+
+.color-swatch::-webkit-color-swatch-wrapper {
+  padding: 0;
+}
+
+.color-swatch::-webkit-color-swatch,
+.color-swatch::-moz-color-swatch {
+  border: none;
+  border-radius: 0.3rem;
+}
+
+details > summary {
+  list-style: none;
+}
+
+details > summary::-webkit-details-marker {
+  display: none;
+}
