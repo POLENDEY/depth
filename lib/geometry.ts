@@ -225,7 +225,7 @@ function missingGlyphs(font: Font, text: string) {
   return missing;
 }
 
-function textToRings(font: Font, text: string, letterHeight: number, maxCurveSteps: number) {
+function textToRings(font: Font, text: string, letterHeight: number, maxCurveSteps: number, stepMm = 1.4) {
   const sample = font.charToGlyph("H");
   const capUnits = sample.yMax || font.ascender || font.unitsPerEm * 0.7;
   const fontSize = (letterHeight * font.unitsPerEm) / capUnits;
@@ -243,10 +243,10 @@ function textToRings(font: Font, text: string, letterHeight: number, maxCurveSte
     x += (glyph.advanceWidth ?? font.unitsPerEm * 0.5) * scale;
   }
 
-  return commandsToRings(commands, maxCurveSteps).filter((ring) => Math.abs(signedArea(ring)) > 0.12);
+  return commandsToRings(commands, maxCurveSteps, stepMm).filter((ring) => Math.abs(signedArea(ring)) > 0.12);
 }
 
-function commandsToRings(commands: PathCommand[], maxCurveSteps: number) {
+function commandsToRings(commands: PathCommand[], maxCurveSteps: number, stepMm = 1.4) {
   const rings: Ring[] = [];
   let ring: Ring = [];
   let cx = 0;
@@ -279,7 +279,7 @@ function commandsToRings(commands: PathCommand[], maxCurveSteps: number) {
         Math.hypot(command.x1 - cx, command.y1 - cy) +
         Math.hypot(command.x2 - command.x1, command.y2 - command.y1) +
         Math.hypot(end.x - command.x2, end.y - command.y2);
-      const steps = Math.max(2, Math.min(maxCurveSteps, Math.ceil(length / 1.4)));
+      const steps = Math.max(stepMm < 1 ? 6 : 2, Math.min(maxCurveSteps, Math.ceil(length / stepMm)));
       for (let step = 1; step <= steps; step += 1) {
         const t = step / steps;
         const point = cubic(
@@ -297,7 +297,7 @@ function commandsToRings(commands: PathCommand[], maxCurveSteps: number) {
       const end = { x: command.x, y: command.y };
       const length =
         Math.hypot(command.x1 - cx, command.y1 - cy) + Math.hypot(end.x - command.x1, end.y - command.y1);
-      const steps = Math.max(2, Math.min(maxCurveSteps, Math.ceil(length / 1.4)));
+      const steps = Math.max(stepMm < 1 ? 6 : 2, Math.min(maxCurveSteps, Math.ceil(length / stepMm)));
       for (let step = 1; step <= steps; step += 1) {
         const t = step / steps;
         const point = quadratic({ x: cx, y: cy }, { x: command.x1, y: command.y1 }, end, t);
@@ -616,6 +616,104 @@ function pathBounds(paths: Paths) {
 function spanX(paths: Paths) {
   const bounds = pathBounds(paths);
   return bounds.maxX - bounds.minX;
+}
+
+export function outlinedMagnet(font: Font, text: string, letterHeight: number, outline: number, pocketRadius: number) {
+  const raw = text.normalize("NFC").trim().slice(0, MAX_CHARS);
+  if (!raw) throw new Error("Type a name to generate this model.");
+  const missing = missingGlyphs(font, raw);
+  const warnings = missing.length
+    ? [`This font has no glyph for ${missing.join(" ")}. Those characters were skipped.`]
+    : [];
+  const rings = textToRings(font, raw, letterHeight, 36, 0.4);
+  if (!rings.length) throw new Error("That text has no printable outlines. Try letters or numbers.");
+  const textPaths = clean(unionPaths(toClipper(rings)), 0.004);
+  if (!textPaths.length) throw new Error("The letters could not be combined. Try a different font.");
+  let basePaths = offsetPaths(textPaths, outline, 0.012);
+  if (spanX(basePaths) + 0.2 < spanX(textPaths)) {
+    basePaths = offsetPaths(reversePaths(textPaths), outline, 0.012);
+  }
+  basePaths = clean(unionPaths(basePaths), 0.008);
+  if (!basePaths.length) throw new Error("The outline collapsed. Increase the outline width slightly.");
+  const pocket = placePocket(basePaths, pocketRadius);
+  if (pocket.radius > 0 && pocket.radius + 0.05 < pocketRadius) {
+    warnings.push("The magnet was made smaller so it stays inside the name.");
+  }
+  if (!pocket.shapes) warnings.push("The name is too small for a magnet pocket. Raise the letter height.");
+  return {
+    textShapes: pathsToShapes(textPaths),
+    baseShapes: pathsToShapes(basePaths),
+    pocketShapes: pocket.shapes,
+    warnings,
+  };
+}
+
+function placePocket(basePaths: Paths, radius: number) {
+  const polygons = ClipperLib.JS.PolyTreeToExPolygons(pathsToTree(basePaths)).map((polygon) => ({
+    outer: toRing(polygon.outer),
+    holes: polygon.holes.map((hole) => toRing(hole)),
+  }));
+  const bounds = pathBounds(basePaths);
+  const centerX = (bounds.minX + bounds.maxX) / 2;
+  const centerY = (bounds.minY + bounds.maxY) / 2;
+  let size = radius;
+  while (size >= 1.5) {
+    const spot = findPocket(polygons, bounds, centerX, centerY, size);
+    if (spot) {
+      const cut = exPolygonsToShapes(difference(basePaths, circlePath(spot.x, spot.y, size, 128)));
+      if (cut.holeCount) return { shapes: cut.shapes, radius: size };
+    }
+    size = Math.round((size - 0.5) * 10) / 10;
+  }
+  return { shapes: null as THREE.Shape[] | null, radius: 0 };
+}
+
+function findPocket(
+  polygons: { outer: Point[]; holes: Point[][] }[],
+  bounds: { minX: number; minY: number; maxX: number; maxY: number },
+  centerX: number,
+  centerY: number,
+  radius: number,
+) {
+  let best: { x: number; y: number; score: number } | null = null;
+  for (let y = bounds.minY + radius; y <= bounds.maxY - radius + 0.01; y += 1.6) {
+    for (let x = bounds.minX + radius; x <= bounds.maxX - radius + 0.01; x += 1.6) {
+      if (!circleInside(polygons, x, y, radius)) continue;
+      const score = Math.hypot(x - centerX, y - centerY);
+      if (!best || score < best.score) best = { x, y, score };
+    }
+  }
+  return best;
+}
+
+function circleInside(polygons: { outer: Point[]; holes: Point[][] }[], cx: number, cy: number, radius: number) {
+  for (let index = 0; index < 20; index += 1) {
+    const angle = (index / 20) * Math.PI * 2;
+    if (!insideOutline(polygons, cx + Math.cos(angle) * radius, cy + Math.sin(angle) * radius)) return false;
+  }
+  return insideOutline(polygons, cx, cy);
+}
+
+function insideOutline(polygons: { outer: Point[]; holes: Point[][] }[], x: number, y: number) {
+  return polygons.some(
+    (polygon) => pointInRing(x, y, polygon.outer) && polygon.holes.every((hole) => !pointInRing(x, y, hole)),
+  );
+}
+
+function toRing(path: Path): Point[] {
+  return path.map((point) => ({ x: point.X / SCALE, y: point.Y / SCALE }));
+}
+
+function pointInRing(x: number, y: number, ring: Point[]) {
+  let inside = false;
+  for (let index = 0, previous = ring.length - 1; index < ring.length; previous = index, index += 1) {
+    const current = ring[index];
+    const prior = ring[previous];
+    if (current.y > y !== prior.y > y && x < ((prior.x - current.x) * (y - current.y)) / (prior.y - current.y) + current.x) {
+      inside = !inside;
+    }
+  }
+  return inside;
 }
 
 function pathArea(path: Path) {

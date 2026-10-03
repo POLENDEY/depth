@@ -177,14 +177,14 @@ function LabelArt() {
 
 function MagnetArt() {
   return (
-    <Scene id="magnet" from="#f5f5f4" to="#e7e5e4">
-      <text x="36" y="90" fill="#78716c" fontFamily="Pacifico, cursive" fontSize="36">
-        Evelyn
+    <Scene id="magnet" from="#f7f4ef" to="#ece7df">
+      <text x="28" y="78" fill="#2f6fed" stroke="#f6f3ee" strokeWidth="8" paintOrder="stroke" fontFamily="Pacifico, cursive" fontSize="40">
+        Emma
       </text>
-      <text x="150" y="88" fill="#65a30d" fontFamily="Lilita One, sans-serif" fontSize="32">
-        LUCAS
+      <text x="168" y="86" fill="#e15b64" stroke="#f6f3ee" strokeWidth="8" paintOrder="stroke" fontFamily="Pacifico, cursive" fontSize="40">
+        Liam
       </text>
-      <text x="78" y="150" fill="#7c3aed" fontFamily="Pacifico, cursive" fontSize="40">
+      <text x="86" y="158" fill="#7c3aed" stroke="#f6f3ee" strokeWidth="9" paintOrder="stroke" fontFamily="Pacifico, cursive" fontSize="44">
         Amelia
       </text>
     </Scene>

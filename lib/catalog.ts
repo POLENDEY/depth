@@ -57,6 +57,7 @@ export type ProductSettings = {
   textColor: string;
   baseColor: string;
   letterHeight: number;
+  outline: number;
   textThickness: number;
   baseThickness: number;
   cableDiameter: number;
@@ -105,6 +106,7 @@ export type Product = {
 
 const shared = {
   fontId: "luckiest-guy",
+  outline: 2.4,
   cableDiameter: 6,
   magnetDiameter: 8,
   photoWidth: 100,
@@ -395,26 +397,29 @@ export const PRODUCTS: Product[] = [
   {
     slug: "magnet",
     title: "Magnet",
-    summary: "A flat name with a round pocket on the back for a magnet.",
+    summary: "A colored name on a smooth outline, with a magnet pocket on the back.",
     button: "#ff5a36",
     settings: {
       ...shared,
       text: "Amelia",
       fontId: "pacifico",
-      textColor: "#f5f5f4",
-      baseColor: "#a8a29e",
-      letterHeight: 22,
-      textThickness: 2.2,
-      baseThickness: 2,
+      textColor: "#2f6fed",
+      baseColor: "#f6f3ee",
+      letterHeight: 28,
+      outline: 2.8,
+      textThickness: 1.8,
+      baseThickness: 3,
       magnetDiameter: 8,
     },
     fields: [
       { type: "text", label: "Name" },
       { type: "font" },
-      { type: "number", key: "letterHeight", label: "Letter height", min: 12, max: 40, step: 0.5 },
-      { type: "number", key: "magnetDiameter", label: "Magnet diameter", min: 4, max: 20, step: 0.5 },
-      { type: "number", key: "baseThickness", label: "Pocket depth", min: 1, max: 4, step: 0.1 },
-      { type: "colors", text: "Letters", base: "Back" },
+      { type: "number", key: "letterHeight", label: "Letter height", min: 12, max: 48, step: 0.5 },
+      { type: "number", key: "outline", label: "Outline", min: 1.4, max: 6, step: 0.1 },
+      { type: "number", key: "textThickness", label: "Letter thickness", min: 0.8, max: 3.2, step: 0.1 },
+      { type: "number", key: "baseThickness", label: "Base thickness", min: 1.8, max: 6, step: 0.1 },
+      { type: "number", key: "magnetDiameter", label: "Magnet diameter", min: 4, max: 18, step: 0.5 },
+      { type: "colors", text: "Letters", base: "Outline" },
     ],
   },
   {

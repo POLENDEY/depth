@@ -8,6 +8,7 @@ import {
   cutShapes,
   extrudeShapes,
   layoutText,
+  outlinedMagnet,
   type GlyphLayout,
   type KeychainModel,
   type MeshQuality,
@@ -767,27 +768,28 @@ function plantLabel(font: Font, settings: ProductSettings, quality: MeshQuality)
   return pack(letters, body, layout.warnings);
 }
 
-function magnet(font: Font, settings: ProductSettings, quality: MeshQuality, curve: number) {
-  const layout = layoutText(font, settings.text, settings.letterHeight, quality);
-  const bounds = boundsOf(layout.glyphs);
-  const width = bounds.maxX - bounds.minX + 8;
-  const height = bounds.maxY - bounds.minY + 8;
-  const pocket = clamp(settings.magnetDiameter, 4, 20) / 2;
-  const pocketDepth = clamp(settings.baseThickness, 1, 4);
-  const holeRadius = Math.min(pocket, Math.min(width, height) * 0.28);
-  const back = extrudeShapes([plateWithHole(width, height, 3, holeRadius)], pocketDepth, curve);
-  const seal = extrudeShapes([roundedRect(width, height, 3)], 1.4, 2);
-  seal.translate(0, 0, pocketDepth - FUSE);
-  const letters = extrudeShapes(layout.shapes, settings.textThickness + FUSE, 1);
-  letters.translate(
-    -(bounds.minX + bounds.maxX) / 2,
-    -(bounds.minY + bounds.maxY) / 2,
-    pocketDepth + 1.4 - FUSE,
-  );
-  back.translate(0, 0, 0);
-  return pack(letters, fuse([back, seal]), [
-    ...layout.warnings,
-    "The round pocket opens onto the print bed, so it ends up on the back.",
+function magnet(font: Font, settings: ProductSettings, _quality: MeshQuality, _curve: number) {
+  const letterHeight = clamp(settings.letterHeight, 12, 48);
+  const outline = clamp(settings.outline, 1.4, 6);
+  const bodyDepth = clamp(settings.baseThickness, 1.8, 6);
+  const letterDepth = clamp(settings.textThickness, 0.8, 3.2);
+  const profile = outlinedMagnet(font, settings.text, letterHeight, outline, clamp(settings.magnetDiameter, 4, 18) / 2);
+  const floor = 0.8;
+  const pocketDepth = profile.pocketShapes ? Math.max(0.8, bodyDepth - floor) : 0;
+  const letters = extrudeShapes(profile.textShapes, letterDepth + FUSE, 2);
+  letters.translate(0, 0, bodyDepth - FUSE);
+  const body: THREE.BufferGeometry[] = [];
+  if (profile.pocketShapes && pocketDepth > 0.4) {
+    body.push(extrudeShapes(profile.pocketShapes, pocketDepth, 2));
+    body.push(
+      extrudeShapes(profile.baseShapes, bodyDepth - pocketDepth + FUSE, 2).translate(0, 0, pocketDepth - FUSE),
+    );
+  } else {
+    body.push(extrudeShapes(profile.baseShapes, bodyDepth, 2));
+  }
+  return pack(letters, fuse(body), [
+    ...profile.warnings,
+    "The colored name sits on a white outline. The round pocket opens on the back for the magnet.",
   ]);
 }
 
@@ -1075,14 +1077,6 @@ function plateWithHoles(
     hole.absarc(x, holeY, holeRadius, 0, Math.PI * 2, true);
     shape.holes.push(hole);
   }
-  return shape;
-}
-
-function plateWithHole(width: number, height: number, radius: number, holeRadius: number) {
-  const shape = roundedRect(width, height, radius);
-  const hole = new THREE.Path();
-  hole.absarc(0, 0, holeRadius, 0, Math.PI * 2, true);
-  shape.holes.push(hole);
   return shape;
 }
 

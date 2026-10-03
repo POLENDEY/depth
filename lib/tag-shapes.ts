@@ -10,10 +10,12 @@ export type TagParts = {
 
 type Ellipse = { x: number; y: number; rx: number; ry: number };
 
-const BASIC = new Set<TagShape>(["circle", "flower", "heart", "star", "square"]);
+function isBasic(shape: TagShape): shape is "circle" | "flower" | "heart" | "star" | "square" {
+  return shape === "circle" || shape === "flower" || shape === "heart" || shape === "star" || shape === "square";
+}
 
 export function familiarParts(shape: TagShape): TagParts {
-  if (BASIC.has(shape)) throw new Error("Basic tags do not use a familiar silhouette.");
+  if (isBasic(shape)) throw new Error("Basic tags do not use a familiar silhouette.");
   return BUILD[shape]();
 }
 
