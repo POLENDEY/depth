@@ -1,10 +1,11 @@
 "use client";
 
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Viewer } from "@/components/viewer";
 import { downloadBlob, EXPORT_FORMATS, exportKeychain, slugify, type ExportFormat } from "@/lib/export";
 import { FontField } from "@/components/font-field";
 import { useFontLibrary } from "@/lib/font-library";
+import { CharmPicker } from "@/components/charm-picker";
 import { buildKeychain, LIMITS, type HoleSide, type KeychainModel, type KeychainParams } from "@/lib/geometry";
 import { formatSize, fromDisplay, toDisplay, type Unit } from "@/lib/units";
 
@@ -22,9 +23,14 @@ const INITIAL: Settings = {
   holeEnabled: true,
   holeDiameter: 5,
   holeSide: "left",
+  holeOffsetX: 0,
+  holeOffsetY: 0,
   baseThickness: 2.4,
   textThickness: 1.6,
-  charm: false,
+  charm: "",
+  charmX: 0,
+  charmY: 0,
+  charmSize: 26,
   textColor: "#f4f4f5",
   baseColor: "#8b78f2",
 };
@@ -56,9 +62,14 @@ export function Studio() {
         holeEnabled: settings.holeEnabled,
         holeDiameter: settings.holeDiameter,
         holeSide: settings.holeSide,
+        holeOffsetX: settings.holeOffsetX,
+        holeOffsetY: settings.holeOffsetY,
         baseThickness: settings.baseThickness,
         textThickness: settings.textThickness,
         charm: settings.charm,
+        charmX: settings.charmX,
+        charmY: settings.charmY,
+        charmSize: settings.charmSize,
       }),
     [settings],
   );
@@ -173,14 +184,38 @@ export function Studio() {
     <div className="grid items-start gap-6 lg:grid-cols-[minmax(0,1fr)_22.5rem]">
       <section className="overflow-hidden rounded-2xl border border-[#e6e7ec] bg-white shadow-[0_1px_2px_rgba(16,24,40,0.04)]">
         <div className="relative h-[min(68vh,620px)] min-h-[420px] bg-[#fbfbfd]">
-          <Viewer model={visibleModel} textColor={settings.textColor} baseColor={settings.baseColor} />
+          <Viewer
+            model={visibleModel}
+            textColor={settings.textColor}
+            baseColor={settings.baseColor}
+            charmX={settings.charmX}
+            charmY={settings.charmY}
+            onCharmMove={
+              settings.charm
+                ? (x, y) => patch({ charmX: x, charmY: y })
+                : undefined
+            }
+            holeX={settings.holeOffsetX}
+            holeY={settings.holeOffsetY}
+            onHoleMove={
+              settings.holeEnabled
+                ? (x, y) => patch({ holeOffsetX: x, holeOffsetY: y })
+                : undefined
+            }
+          />
           <div className="pointer-events-none absolute inset-x-0 bottom-0 flex flex-col gap-2 p-3 sm:flex-row sm:items-end sm:justify-between">
             <div className="pointer-events-none rounded-xl bg-white/85 px-3 py-2 text-sm text-zinc-600 shadow-sm backdrop-blur">
               <p className="font-medium tabular-nums text-zinc-800" aria-live="polite">
                 {sizeLabel}
               </p>
               {sizeInches ? <p className="text-xs tabular-nums text-zinc-500">{sizeInches}</p> : null}
-              <p className="text-xs text-zinc-400">Drag to orbit · Shift+drag to pan · Scroll to zoom</p>
+              <p className="text-xs text-zinc-400">
+                {settings.charm
+                  ? "Drag the icon or the keyring hole on its own · Drag empty space to orbit"
+                  : settings.holeEnabled
+                    ? "Drag the keyring hole to move it · Drag empty space to orbit"
+                    : "Drag to orbit · Shift+drag to pan · Scroll to zoom"}
+              </p>
             </div>
             <div className="pointer-events-auto flex items-center justify-end gap-2">
               <label className="sr-only" htmlFor="export-format">
@@ -242,19 +277,10 @@ export function Studio() {
               style={{ fontFamily: `"${activeFamily}", system-ui, sans-serif` }}
               className="h-10 min-w-0 flex-1 rounded-lg border border-[#d7f3e4] bg-[#e7f9ef] px-3 text-base text-zinc-900 outline-none focus:border-[#8ed4ad] focus:bg-[#dff6e8]"
             />
-            <button
-              type="button"
-              aria-pressed={settings.charm}
-              aria-label={settings.charm ? "Remove paw charm" : "Add paw charm"}
-              onClick={() => patch({ charm: !settings.charm })}
-              className={`grid h-10 w-10 place-items-center rounded-lg border ${
-                settings.charm
-                  ? "border-[#c7b9ff] bg-[#f3efff] text-[#6d5efc]"
-                  : "border-[#e6e7ec] bg-white text-zinc-500 hover:bg-zinc-50"
-              }`}
-            >
-              <PawIcon />
-            </button>
+            <CharmPicker
+              value={settings.charm}
+              onChange={(charm) => patch({ charm, charmX: 0, charmY: 0 })}
+            />
             <button
               type="button"
               aria-label="Reset name"
@@ -287,7 +313,7 @@ export function Studio() {
         </button>
         {more ? (
           <p className="mb-3 ml-[5.25rem] text-xs leading-5 text-zinc-500">
-            The paw button adds a small charm on the last letter. Reset restores the sample name.
+            The icon button adds a printable charm. Emoji are the real OpenMoji line drawings, CC BY-SA 4.0. Drag an icon in the preview to place it. Reset restores the sample name.
           </p>
         ) : null}
 
@@ -341,6 +367,30 @@ export function Studio() {
           })}
         </div>
 
+        {settings.charm ? (
+          <Field label="Icon" htmlFor="icon-size">
+            <div className="flex items-center gap-2">
+              <input
+                id="icon-size"
+                type="number"
+                inputMode="decimal"
+                min={toDisplay(LIMITS.charmSize[0], unit)}
+                max={toDisplay(LIMITS.charmSize[1], unit)}
+                step={unit === "mm" ? 0.5 : 0.02}
+                value={displayNumber(settings.charmSize, unit)}
+                onChange={(event) =>
+                  commitNumber(event.target.value, unit, LIMITS.charmSize, (charmSize) => patch({ charmSize }))
+                }
+                className="h-10 w-24 rounded-lg border border-[#e6e7ec] bg-[#fafafa] px-3 text-sm tabular-nums"
+              />
+              <span className="text-sm text-zinc-500">{unit}</span>
+            </div>
+            <p className="mt-1 text-xs text-zinc-400">
+              Height of the icon or emoji. Drag it in the preview to move it.
+            </p>
+          </Field>
+        ) : null}
+
         <Disclosure title="Outline" value={formatCompact(settings.outline, unit)}>
           <NumberField
             id="outline-width"
@@ -381,7 +431,7 @@ export function Studio() {
               <button
                 key={side}
                 type="button"
-                onClick={() => patch({ holeSide: side })}
+                onClick={() => patch({ holeSide: side, holeOffsetX: 0, holeOffsetY: 0 })}
                 className={`h-8 flex-1 rounded-lg border text-sm capitalize ${
                   settings.holeSide === side
                     ? "border-zinc-900 bg-zinc-900 text-white"
@@ -392,6 +442,9 @@ export function Studio() {
               </button>
             ))}
           </div>
+          <p className="text-xs leading-5 text-zinc-500">
+            Drag the hole in the preview. Moving an icon does not move the hole.
+          </p>
         </Disclosure>
 
         <div className="mt-3 rounded-xl border border-[#eceef2] bg-[#fafafa] p-3">
@@ -597,17 +650,6 @@ function ResetIcon() {
     <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true" fill="none">
       <path d="M13 8a5 5 0 1 1-1.4-3.4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
       <path d="M12.8 2.8v2.6H10.2" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  );
-}
-
-function PawIcon() {
-  return (
-    <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true" fill="currentColor">
-      <ellipse cx="8" cy="10.2" rx="2.5" ry="2.1" />
-      <circle cx="4.7" cy="7.2" r="1.25" />
-      <circle cx="8" cy="5.6" r="1.25" />
-      <circle cx="11.3" cy="7.2" r="1.25" />
     </svg>
   );
 }

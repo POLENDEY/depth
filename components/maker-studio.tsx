@@ -1,12 +1,13 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { CharmPicker } from "@/components/charm-picker";
 import { FontField } from "@/components/font-field";
 import { Viewer } from "@/components/viewer";
 import { productBySlug, TAG_GROUPS, type ProductSettings, type TagShape } from "@/lib/catalog";
 import { downloadBlob, EXPORT_FORMATS, exportKeychain, slugify, type ExportFormat } from "@/lib/export";
 import { useFontLibrary } from "@/lib/font-library";
-import type { KeychainModel } from "@/lib/geometry";
+import { LIMITS, type KeychainModel } from "@/lib/geometry";
 import { buildProduct } from "@/lib/models";
 import { encodeSpotifyBars, fetchSpotifyBars } from "@/lib/spotify-code";
 import { formatSize, fromDisplay, toDisplay, type Unit } from "@/lib/units";
@@ -159,14 +160,25 @@ export function MakerStudio({ slug }: { slug: string }) {
     <div className="grid items-start gap-6 lg:grid-cols-[minmax(0,1fr)_22.5rem]">
       <section className="overflow-hidden rounded-2xl border border-[#e6e7ec] bg-white shadow-[0_1px_2px_rgba(16,24,40,0.04)]">
         <div className="relative h-[min(68vh,620px)] min-h-[420px] bg-[#fbfbfd]">
-          <Viewer model={visible} textColor={settings.textColor} baseColor={settings.baseColor} />
+          <Viewer
+            model={visible}
+            textColor={settings.textColor}
+            baseColor={settings.baseColor}
+            charmX={settings.charmX}
+            charmY={settings.charmY}
+            onCharmMove={slug === "magnet" && settings.charm ? (x, y) => patch({ charmX: x, charmY: y }) : undefined}
+          />
           <div className="pointer-events-none absolute inset-x-0 bottom-0 flex flex-col gap-2 p-3 sm:flex-row sm:items-end sm:justify-between">
             <div className="rounded-xl bg-white/85 px-3 py-2 text-sm text-zinc-600 shadow-sm backdrop-blur">
               <p className="font-medium tabular-nums text-zinc-800" aria-live="polite">
                 {sizeLabel}
               </p>
               {sizeOther ? <p className="text-xs tabular-nums text-zinc-500">{sizeOther}</p> : null}
-              <p className="text-xs text-zinc-400">Drag to orbit · Shift+drag to pan · Scroll to zoom</p>
+              <p className="text-xs text-zinc-400">
+                {slug === "magnet" && settings.charm
+                  ? "Drag the icon to move it · Drag empty space to orbit"
+                  : "Drag to orbit · Shift+drag to pan · Scroll to zoom"}
+              </p>
             </div>
             <div className="pointer-events-auto flex items-center justify-end gap-2">
               <label className="sr-only" htmlFor={`${slug}-format`}>
@@ -280,6 +292,25 @@ export function MakerStudio({ slug }: { slug: string }) {
               </label>
             );
           }
+          if (field.type === "link-style") {
+            return (
+              <label key="link-style" className="mb-3 block text-sm text-zinc-600" htmlFor={`${slug}-link-style`}>
+                {field.label}
+                <select
+                  id={`${slug}-link-style`}
+                  value={settings.linkStyle}
+                  onChange={(event) => patch({ linkStyle: event.target.value as ProductSettings["linkStyle"] })}
+                  className="mt-1 h-10 w-full rounded-lg border border-[#e6e7ec] bg-[#fafafa] px-2 text-sm"
+                >
+                  <option value="tile">Tiles</option>
+                  <option value="block">Blocks</option>
+                </select>
+                <span className="mt-1 block text-xs text-zinc-400">
+                  Tiles are plates with a raised letter. Blocks are the letters themselves, joined by a bar through a round hole so each letter can pivot. Letter distance sets the space between letters.
+                </span>
+              </label>
+            );
+          }
           if (field.type === "text-flow") {
             return (
               <label key="text-flow" className="mb-3 block text-sm text-zinc-600" htmlFor={`${slug}-text-flow`}>
@@ -332,6 +363,37 @@ export function MakerStudio({ slug }: { slug: string }) {
               </label>
             );
           }
+          if (field.type === "charm") {
+            return (
+              <div key="charm" className="mb-3">
+                <div className="flex items-center justify-between gap-3">
+                  <p className="text-sm text-zinc-600">Icon</p>
+                  <CharmPicker
+                    value={settings.charm}
+                    onChange={(charm) => patch({ charm, charmX: 0, charmY: 0 })}
+                  />
+                </div>
+                {settings.charm ? (
+                  <div className="mt-2">
+                    <NumberRow
+                      id={`${slug}-charm-size`}
+                      label="Icon size"
+                      unit={unit}
+                      value={settings.charmSize}
+                      min={LIMITS.charmSize[0]}
+                      max={LIMITS.charmSize[1]}
+                      step={0.5}
+                      onUnit={setUnit}
+                      onChange={(charmSize) => patch({ charmSize })}
+                    />
+                    <p className="text-xs text-zinc-400">Drag the icon in the preview. Emoji faces are filled line art.</p>
+                  </div>
+                ) : (
+                  <p className="mt-1 text-xs text-zinc-400">Add an icon or emoji after the name.</p>
+                )}
+              </div>
+            );
+          }
           if (field.type === "font") {
             return (
               <div key="font" className="mb-3">
@@ -349,13 +411,15 @@ export function MakerStudio({ slug }: { slug: string }) {
             );
           }
           if (field.type === "number") {
+            if (field.key === "linkHeight" && settings.linkStyle === "block") return null;
+            if ((field.key === "linkSize" || field.key === "letterGap") && settings.linkStyle !== "block") return null;
             return (
               <NumberRow
                 key={field.key}
                 id={`${slug}-${field.key}`}
                 label={field.label}
                 unit={unit}
-                value={settings[field.key]}
+                value={settings[field.key] ?? (field.key === "linkSize" ? 6 : field.min)}
                 min={field.min}
                 max={field.max}
                 step={field.step}

@@ -17,11 +17,56 @@ type ViewerProps = {
   model: KeychainModel | null;
   textColor: string;
   baseColor: string;
+  charmX?: number;
+  charmY?: number;
+  onCharmMove?: (x: number, y: number) => void;
+  holeX?: number;
+  holeY?: number;
+  onHoleMove?: (x: number, y: number) => void;
 };
 
-export function Viewer({ model, textColor, baseColor }: ViewerProps) {
+type DragInfo = {
+  charmBounds: KeychainModel["charmBounds"];
+  charmX: number;
+  charmY: number;
+  onCharmMove?: (x: number, y: number) => void;
+  hole: KeychainModel["hole"];
+  holeX: number;
+  holeY: number;
+  onHoleMove?: (x: number, y: number) => void;
+};
+
+export function Viewer({
+  model,
+  textColor,
+  baseColor,
+  charmX = 0,
+  charmY = 0,
+  onCharmMove,
+  holeX = 0,
+  holeY = 0,
+  onHoleMove,
+}: ViewerProps) {
   const hostRef = useRef<HTMLDivElement>(null);
   const apiRef = useRef<ViewerApi | null>(null);
+  const dragRef = useRef<DragInfo>({
+    charmBounds: null,
+    charmX: 0,
+    charmY: 0,
+    hole: null,
+    holeX: 0,
+    holeY: 0,
+  });
+  dragRef.current = {
+    charmBounds: model?.charmBounds ?? null,
+    charmX,
+    charmY,
+    onCharmMove,
+    hole: model?.hole ?? null,
+    holeX,
+    holeY,
+    onHoleMove,
+  };
   useEffect(() => {
     const host = hostRef.current;
     if (!host) return;
@@ -179,11 +224,110 @@ export function Viewer({ model, textColor, baseColor }: ViewerProps) {
 
     apiRef.current = { textMesh, baseMesh, textMat, baseMat, frame };
 
+    const raycaster = new THREE.Raycaster();
+    const pointer = new THREE.Vector2();
+    const drag = {
+      active: false,
+      target: "charm" as "charm" | "hole",
+      pointerId: -1,
+      startLocal: new THREE.Vector3(),
+      startX: 0,
+      startY: 0,
+      plane: new THREE.Plane(),
+      hit: new THREE.Vector3(),
+    };
+
+    const setPointer = (event: PointerEvent) => {
+      const rect = renderer.domElement.getBoundingClientRect();
+      pointer.x = ((event.clientX - rect.left) / Math.max(rect.width, 1)) * 2 - 1;
+      pointer.y = -((event.clientY - rect.top) / Math.max(rect.height, 1)) * 2 + 1;
+    };
+
+    const onPointerDown = (event: PointerEvent) => {
+      if (event.button !== 0 || event.shiftKey || event.altKey || event.ctrlKey || event.metaKey) return;
+      const info = dragRef.current;
+      if (!info.onCharmMove && !info.onHoleMove) return;
+      setPointer(event);
+      raycaster.setFromCamera(pointer, camera);
+      const hit = raycaster.intersectObjects([textMesh, baseMesh], false)[0];
+      if (!hit) return;
+      const local = modelRoot.worldToLocal(hit.point.clone());
+      let target: "charm" | "hole" | null = null;
+      if (info.hole && info.onHoleMove) {
+        const reach = info.hole.radius + 1.8;
+        if ((local.x - info.hole.x) ** 2 + (local.y - info.hole.y) ** 2 <= reach ** 2) target = "hole";
+      }
+      const box = info.charmBounds;
+      if (!target && box && info.onCharmMove) {
+        const pad = 1.6;
+        if (
+          local.x >= box.minX - pad &&
+          local.x <= box.maxX + pad &&
+          local.y >= box.minY - pad &&
+          local.y <= box.maxY + pad
+        ) {
+          target = "charm";
+        }
+      }
+      if (!target) return;
+      drag.active = true;
+      drag.target = target;
+      drag.pointerId = event.pointerId;
+      drag.startLocal.copy(local);
+      drag.startX = target === "hole" ? info.holeX : info.charmX;
+      drag.startY = target === "hole" ? info.holeY : info.charmY;
+      const normal = new THREE.Vector3(0, 0, 1).transformDirection(modelRoot.matrixWorld);
+      drag.plane.setFromNormalAndCoplanarPoint(normal, hit.point);
+      userMoved = true;
+      controls.enabled = false;
+      renderer.domElement.style.cursor = "grabbing";
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    };
+
+    const onPointerMove = (event: PointerEvent) => {
+      if (!drag.active || event.pointerId !== drag.pointerId) return;
+      setPointer(event);
+      raycaster.setFromCamera(pointer, camera);
+      if (!raycaster.ray.intersectPlane(drag.plane, drag.hit)) return;
+      const local = modelRoot.worldToLocal(drag.hit.clone());
+      const info = dragRef.current;
+      const dx = local.x - drag.startLocal.x;
+      const dy = local.y - drag.startLocal.y;
+      if (drag.target === "hole") {
+        info.onHoleMove?.(
+          Math.min(120, Math.max(-120, drag.startX + dx)),
+          Math.min(80, Math.max(-80, drag.startY + dy)),
+        );
+        return;
+      }
+      info.onCharmMove?.(
+        Math.min(90, Math.max(-90, drag.startX + dx)),
+        Math.min(50, Math.max(-50, drag.startY + dy)),
+      );
+    };
+
+    const endDrag = (event: PointerEvent) => {
+      if (!drag.active || event.pointerId !== drag.pointerId) return;
+      drag.active = false;
+      controls.enabled = true;
+      renderer.domElement.style.cursor = "";
+    };
+
+    renderer.domElement.addEventListener("pointerdown", onPointerDown, true);
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", endDrag);
+    window.addEventListener("pointercancel", endDrag);
+
     return () => {
       document.removeEventListener("visibilitychange", onVisibility);
       controls.removeEventListener("start", onStart);
       renderer.domElement.removeEventListener("mousedown", blockMiddleClick);
       renderer.domElement.removeEventListener("auxclick", blockMiddleClick);
+      renderer.domElement.removeEventListener("pointerdown", onPointerDown, true);
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", endDrag);
+      window.removeEventListener("pointercancel", endDrag);
       observer.disconnect();
       renderer.setAnimationLoop(null);
       controls.dispose();
@@ -225,7 +369,7 @@ export function Viewer({ model, textColor, baseColor }: ViewerProps) {
         ref={hostRef}
         className="absolute inset-0"
         role="img"
-        aria-label="Interactive 3D preview. Drag to orbit, Shift and drag to pan, scroll to zoom."
+        aria-label="Interactive 3D preview. Drag to orbit, Shift and drag to pan, scroll to zoom. Drag an icon or the keyring hole to move that part on its own."
       />
       <button
         type="button"

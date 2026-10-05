@@ -595,6 +595,16 @@ function articulated(font: Font, settings: ProductSettings, quality: MeshQuality
   const knuckleRadius = clamp(linkHeight * 0.12, 1.8, 3.2);
   const plateGap = knuckleRadius * 2 + 0.7;
   let cursor = knuckleRadius + 2.4;
+  if (settings.linkStyle === "block") {
+    return blockArticulated(
+      layout,
+      bodyDepth,
+      capDepth,
+      clamp(settings.holeDiameter, 3, 8) / 2,
+      clamp(settings.linkSize || 6, 5, 14),
+      clamp(settings.letterGap || 0, 0, 24),
+    );
+  }
   const plates = glyphs.map((glyph) => {
     const glyphWidth = Math.max(2.8, glyph.maxX - glyph.minX);
     const width = Math.max(glyphWidth + 3.2, linkHeight * 0.62);
@@ -637,6 +647,260 @@ function articulated(font: Font, settings: ProductSettings, quality: MeshQuality
     ...layout.warnings,
     "Print it flat. The hinge pin is captured, with about 0.3 mm of clearance so the links can still flex.",
   ]);
+}
+
+function blockArticulated(
+  layout: { glyphs: GlyphLayout[]; warnings: string[] },
+  bodyDepth: number,
+  capDepth: number,
+  holeRadius: number,
+  linkSize: number,
+  letterGap: number,
+) {
+  const glyphs = layout.glyphs;
+  const capTop = Math.max(...glyphs.map((glyph) => glyph.maxY));
+  const baseLine = Math.min(...glyphs.map((glyph) => glyph.minY));
+  const midY = (capTop + baseLine) / 2;
+  const letterSpan = Math.max(6, capTop - baseLine);
+  const cap = clamp(1.5 + capDepth * 0.9, 1.6, 3.6);
+  const ringHole = Math.min(holeRadius, letterSpan * 0.16, 2.8);
+  const chain = chainMetrics(linkSize, letterGap);
+  const gap = chain.gap;
+  let leftX = ringHole * 2 + 1.4;
+  const bodies: THREE.BufferGeometry[] = [];
+  const caps: THREE.BufferGeometry[] = [];
+
+  glyphs.forEach((glyph, index) => {
+    const width = Math.max(1.4, glyph.maxX - glyph.minX);
+    const shift = -glyph.minX;
+    const body = extrudeShapes(glyph.shapes, bodyDepth, 12);
+    body.translate(shift, 0, 0);
+    placePart(body, 0, midY, 0, leftX, midY);
+    bodies.push(body);
+    const top = extrudeShapes(glyph.shapes, cap + FUSE, 12);
+    top.translate(shift, 0, bodyDepth - FUSE);
+    placePart(top, 0, midY, 0, leftX, midY);
+    caps.push(top);
+
+    if (index === 0) {
+      const leftStroke = outlineExtreme(glyph, midY, "min") + shift;
+      const leftTenon = letterBridge(0, Math.max(leftStroke, 0) + 1.4, midY, 3.2, bodyDepth);
+      if (leftTenon) {
+        placePart(leftTenon, 0, midY, 0, leftX, midY);
+        bodies.push(leftTenon);
+      }
+    }
+
+    if (index < glyphs.length - 1) {
+      const next = glyphs[index + 1];
+      const embedLeft = Math.max(0, glyph.maxX - outlineExtreme(glyph, midY, "max")) + 3.6;
+      const embedRight = Math.max(0, outlineExtreme(next, midY, "min") - next.minX) + 3.6;
+      const jointX = leftX + width + gap / 2;
+      for (const part of chainLinks(bodyDepth + cap, chain, embedLeft, embedRight)) {
+        placePart(part, 0, 0, 0, jointX, midY);
+        bodies.push(part);
+      }
+      leftX += width + gap;
+    }
+  });
+
+  const tab = extrudeShapes([ring(ringHole + 1.6, ringHole)], bodyDepth, ROUND);
+  tab.translate(-ringHole - 0.55, midY, 0);
+  placePart(tab, 0, midY, 0, ringHole * 2 + 1.4, midY);
+  bodies.push(tab);
+
+  return pack(fuse(caps), fuse(bodies), [
+    ...layout.warnings,
+    "Print it flat. A bar passes through a round hole, with clearance so each letter can pivot.",
+  ]);
+}
+
+type ChainMetrics = {
+  holeR: number;
+  axleR: number;
+  headR: number;
+  baseX: number;
+  rightFace: number;
+  apexX: number;
+  half: number;
+  cornerR: number;
+  tipR: number;
+  plateT: number;
+  barH: number;
+  headT: number;
+  keeperT: number;
+  axial: number;
+  gap: number;
+  shift: number;
+};
+
+function chainMetrics(size: number, distance = 0): ChainMetrics {
+  const height = clamp(size, 5, 14);
+  const holeR = clamp(height * 0.22, 1.35, 2.6);
+  const axleR = holeR - 0.4;
+  const headR = holeR + 0.55;
+  const plateT = 1.15;
+  const axial = 0.35;
+  const barH = axleR * 1.15;
+  const headT = Math.max(1.45, holeR * 0.9);
+  const keeperT = 0.75;
+  const extra = clamp(distance, 0, 24);
+  const visibleBar = holeR + 1.85;
+  const rightFace = holeR + 1.55;
+  const leftFace = -(visibleBar + extra);
+  const baseX = -(holeR + 1.05);
+  const apexX = rightFace + 3.6;
+  const span = apexX - baseX;
+  const half = ((holeR + 1.0) * span) / apexX;
+  return {
+    holeR,
+    axleR,
+    headR,
+    baseX,
+    rightFace,
+    apexX,
+    half,
+    cornerR: Math.max(0.75, holeR * 0.45),
+    tipR: Math.max(1.7, holeR * 0.95),
+    plateT,
+    barH,
+    headT,
+    keeperT,
+    axial,
+    gap: rightFace - leftFace,
+    shift: (leftFace + rightFace) / 2,
+  };
+}
+
+function eyeShape(chain: ChainMetrics) {
+  const shape = new THREE.Shape();
+  roundedPoly(
+    shape,
+    [
+      new THREE.Vector2(chain.baseX, chain.half),
+      new THREE.Vector2(chain.baseX, -chain.half),
+      new THREE.Vector2(chain.apexX, 0),
+    ],
+    [chain.cornerR, chain.cornerR, chain.tipR],
+  );
+  const hole = new THREE.Path();
+  hole.absarc(0, 0, chain.holeR, 0, Math.PI * 2, true);
+  shape.holes.push(hole);
+  return shape;
+}
+
+function roundedPoly(shape: THREE.Shape, points: THREE.Vector2[], radii: number[]) {
+  const count = points.length;
+  const corners = points.map((point, index) => {
+    const previous = points[(index + count - 1) % count];
+    const next = points[(index + 1) % count];
+    const towardPrevious = new THREE.Vector2().subVectors(previous, point);
+    const towardNext = new THREE.Vector2().subVectors(next, point);
+    const previousLength = towardPrevious.length();
+    const nextLength = towardNext.length();
+    towardPrevious.multiplyScalar(1 / previousLength);
+    towardNext.multiplyScalar(1 / nextLength);
+    const cut = Math.min(radii[index], previousLength * 0.45, nextLength * 0.45);
+    return {
+      start: point.clone().add(towardPrevious.multiplyScalar(cut)),
+      end: point.clone().add(towardNext.multiplyScalar(cut)),
+      at: point,
+    };
+  });
+  shape.moveTo(corners[0].start.x, corners[0].start.y);
+  for (let index = 0; index < count; index += 1) {
+    const corner = corners[index];
+    shape.quadraticCurveTo(corner.at.x, corner.at.y, corner.end.x, corner.end.y);
+    const next = corners[(index + 1) % count];
+    shape.lineTo(next.start.x, next.start.y);
+  }
+  shape.closePath();
+}
+
+function chainLinks(room: number, chain: ChainMetrics, embedLeft = 3.6, embedRight = 3.6) {
+  const apexX = chain.rightFace + embedRight;
+  const span = apexX - chain.baseX;
+  const fitted = { ...chain, apexX, half: ((chain.holeR + 1) * span) / apexX };
+  const plateBottom = Math.min(chain.keeperT + chain.axial, Math.max(0.8, room * 0.28));
+  const plate = extrudeShapes([eyeShape(fitted)], chain.plateT, 96);
+  plate.translate(0, 0, plateBottom);
+
+  const knuckleBottom = plateBottom + chain.plateT + chain.axial;
+  const knuckle = new THREE.CylinderGeometry(chain.axleR, chain.axleR, chain.headT, 64);
+  knuckle.rotateX(Math.PI / 2);
+  knuckle.translate(0, 0, knuckleBottom + chain.headT / 2);
+
+  const barLeft = chain.shift - chain.gap / 2 - embedLeft;
+  const barDrop = (chain.axleR - chain.barH / 2) * 0.45;
+  const bar = new THREE.BoxGeometry(chain.axleR * 0.15 - barLeft, chain.barH, chain.headT);
+  bar.translate((barLeft + chain.axleR * 0.15) / 2, -barDrop, knuckleBottom + chain.headT / 2);
+
+  const keeper = new THREE.CylinderGeometry(chain.headR, chain.headR, chain.keeperT, 64);
+  keeper.rotateX(Math.PI / 2);
+  keeper.translate(0, 0, chain.keeperT / 2);
+
+  const axleBottom = chain.keeperT * 0.35;
+  const axleTop = knuckleBottom + chain.headT * 0.6;
+  const axle = new THREE.CylinderGeometry(chain.axleR, chain.axleR, axleTop - axleBottom, 64);
+  axle.rotateX(Math.PI / 2);
+  axle.translate(0, 0, (axleBottom + axleTop) / 2);
+
+  for (const part of [plate, knuckle, bar, keeper, axle]) part.translate(-chain.shift, 0, 0);
+  return [plate, bar, knuckle, keeper, axle];
+}
+
+function placePart(
+  geometry: THREE.BufferGeometry,
+  pivotX: number,
+  pivotY: number,
+  angle: number,
+  worldX: number,
+  worldY: number,
+) {
+  geometry.translate(-pivotX, -pivotY, 0);
+  if (Math.abs(angle) > 1e-6) geometry.rotateZ(angle);
+  geometry.translate(worldX, worldY, 0);
+}
+
+function outlineExtreme(glyph: GlyphLayout, y: number, side: "min" | "max") {
+  let best = side === "max" ? -Infinity : Infinity;
+  let found = false;
+  for (const shape of glyph.shapes) {
+    const points = shape.getPoints(4);
+    for (let index = 0; index < points.length; index += 1) {
+      const start = points[index];
+      const end = points[(index + 1) % points.length];
+      const dy = end.y - start.y;
+      if (Math.abs(dy) < 1e-6) {
+        if (Math.abs(start.y - y) > 0.35) continue;
+        const x = side === "max" ? Math.max(start.x, end.x) : Math.min(start.x, end.x);
+        best = side === "max" ? Math.max(best, x) : Math.min(best, x);
+        found = true;
+        continue;
+      }
+      const t = (y - start.y) / dy;
+      if (t < -0.02 || t > 1.02) continue;
+      const x = start.x + t * (end.x - start.x);
+      best = side === "max" ? Math.max(best, x) : Math.min(best, x);
+      found = true;
+    }
+  }
+  if (!found) return side === "max" ? glyph.maxX : glyph.minX;
+  return best;
+}
+
+function letterBridge(fromX: number, toX: number, y: number, height: number, depth: number) {
+  const left = Math.min(fromX, toX);
+  const right = Math.max(fromX, toX);
+  if (right - left < 0.2) return null;
+  const shape = new THREE.Shape();
+  const bottom = y - height / 2;
+  shape.moveTo(left, bottom);
+  shape.lineTo(right, bottom);
+  shape.lineTo(right, bottom + height);
+  shape.lineTo(left, bottom + height);
+  shape.closePath();
+  return extrudeShapes([shape], depth, 1);
 }
 
 function penHolder(font: Font, settings: ProductSettings, quality: MeshQuality, curve: number) {
@@ -773,7 +1037,12 @@ function magnet(font: Font, settings: ProductSettings, _quality: MeshQuality, _c
   const outline = clamp(settings.outline, 1.4, 6);
   const bodyDepth = clamp(settings.baseThickness, 1.8, 6);
   const letterDepth = clamp(settings.textThickness, 0.8, 3.2);
-  const profile = outlinedMagnet(font, settings.text, letterHeight, outline, clamp(settings.magnetDiameter, 4, 18) / 2);
+  const profile = outlinedMagnet(font, settings.text, letterHeight, outline, clamp(settings.magnetDiameter, 4, 18) / 2, {
+    id: settings.charm,
+    x: settings.charmX,
+    y: settings.charmY,
+    size: settings.charmSize,
+  });
   const floor = 0.8;
   const pocketDepth = profile.pocketShapes ? Math.max(0.8, bodyDepth - floor) : 0;
   const letters = extrudeShapes(profile.textShapes, letterDepth + FUSE, 2);
@@ -787,10 +1056,15 @@ function magnet(font: Font, settings: ProductSettings, _quality: MeshQuality, _c
   } else {
     body.push(extrudeShapes(profile.baseShapes, bodyDepth, 2));
   }
-  return pack(letters, fuse(body), [
-    ...profile.warnings,
-    "The colored name sits on a white outline. The round pocket opens on the back for the magnet.",
-  ]);
+  return pack(
+    letters,
+    fuse(body),
+    [
+      ...profile.warnings,
+      "The colored name sits on a white outline. The round pocket opens on the back for the magnet.",
+    ],
+    { anchorX: profile.centerX, anchorY: profile.centerY, charmBounds: profile.charmBounds },
+  );
 }
 
 function wallArt(font: Font, settings: ProductSettings, quality: MeshQuality, curve: number) {
@@ -841,7 +1115,7 @@ function headband(font: Font, settings: ProductSettings, quality: MeshQuality, c
   return pack(letters, band, layout.warnings);
 }
 
-const HINGE_CURVE = 64;
+const HINGE_CURVE = 128;
 const FLANGE_T = 0.75;
 const AXIAL_GAP = 0.3;
 const SIDE_CLEAR = 0.25;
@@ -969,6 +1243,87 @@ export function assertArticulatedHingeRound() {
     throw new Error("Hinge pin head is not wider than the bore");
   }
   for (const part of parts) part.dispose();
+}
+
+export function assertBlockChain() {
+  const chain = chainMetrics(6);
+  const room = 7.6;
+  const parts = chainLinks(room, chain);
+  const [plate, bar, knuckle, keeper, axle] = parts;
+  const holeX = -chain.shift;
+  if (chain.holeR - chain.axleR < 0.3) throw new Error("Knuckle is too tight in the hole");
+  if (chain.headR < chain.holeR + 0.3) throw new Error("Keeper can pull through the hole");
+
+  const plateBox = geometryBounds(plate);
+  const barBox = geometryBounds(bar);
+  const knuckleBox = geometryBounds(knuckle);
+  const keeperBox = geometryBounds(keeper);
+  const plateZ = (plateBox.min.z + plateBox.max.z) / 2;
+  if (plateBox.min.z < 0.2) throw new Error("Link plate sits below the bed");
+  if (keeperBox.min.z < -0.01) throw new Error("Keeper sits below the bed");
+  if (knuckleBox.min.z < plateBox.max.z + 0.25) throw new Error("Knuckle is touching the plate");
+  if (barBox.min.z < plateBox.max.z + 0.25) throw new Error("Bar is touching the plate");
+  if (keeperBox.max.z > plateBox.min.z - 0.25) throw new Error("Keeper is touching the plate");
+
+  const hits = holeHits(plate, holeX, plateZ);
+  const worst = Math.max(...hits.map((hit) => Math.abs(hit - chain.holeR)));
+  if (worst > 0.08) throw new Error(`Link hole is not a circle (${worst.toFixed(3)} mm off)`);
+
+  const position = plate.getAttribute("position");
+  const angles: number[] = [];
+  for (let index = 0; index < position.count; index += 1) {
+    const radius = Math.hypot(position.getX(index) - holeX, position.getY(index));
+    if (Math.abs(radius - chain.holeR) < 0.06) {
+      angles.push(Math.atan2(position.getY(index), position.getX(index) - holeX));
+    }
+  }
+  if (widestAngleGap(angles) > Math.PI / 16) throw new Error("Link hole is not a full circle");
+
+  const axlePosition = axle.getAttribute("position");
+  for (let index = 0; index < axlePosition.count; index += 1) {
+    const z = axlePosition.getZ(index);
+    if (z < plateBox.min.z - 0.02 || z > plateBox.max.z + 0.02) continue;
+    const radius = Math.hypot(axlePosition.getX(index) - holeX, axlePosition.getY(index));
+    if (radius > chain.holeR - 0.25) throw new Error("Axle is rubbing the hole");
+  }
+
+  for (const part of parts) part.dispose();
+}
+
+function geometryBounds(geometry: THREE.BufferGeometry) {
+  geometry.computeBoundingBox();
+  return geometry.boundingBox!;
+}
+
+function holeHits(geometry: THREE.BufferGeometry, holeX: number, zCenter: number) {
+  const material = new THREE.MeshBasicMaterial();
+  const mesh = new THREE.Mesh(geometry, material);
+  const origin = new THREE.Vector3(holeX, 0, zCenter);
+  const hits: number[] = [];
+  for (let step = 0; step < 72; step += 1) {
+    const angle = (step / 72) * Math.PI * 2;
+    const raycaster = new THREE.Raycaster(origin, new THREE.Vector3(Math.cos(angle), Math.sin(angle), 0));
+    hits.push(raycaster.intersectObject(mesh)[0]?.distance ?? Infinity);
+  }
+  material.dispose();
+  return hits;
+}
+
+function smoothGap(geometry: THREE.BufferGeometry, expected: number) {
+  const position = geometry.getAttribute("position");
+  const angles: number[] = [];
+  for (let index = 0; index < position.count; index += 1) {
+    const pointRadius = Math.hypot(position.getX(index), position.getY(index));
+    if (Math.abs(pointRadius - expected) < 0.08) {
+      angles.push(Math.atan2(position.getY(index), position.getX(index)));
+    }
+  }
+  if (angles.length < 40) return 360;
+  const sorted = [...new Set(angles.map((angle) => Math.round(angle * 500) / 500))].sort((a, b) => a - b);
+  const gaps: number[] = [sorted[0] + Math.PI * 2 - sorted[sorted.length - 1]];
+  for (let index = 1; index < sorted.length; index += 1) gaps.push(sorted[index] - sorted[index - 1]);
+  gaps.sort((a, b) => b - a);
+  return ((gaps[1] ?? gaps[0]) * 180) / Math.PI;
 }
 
 function boreHits(geometry: THREE.BufferGeometry, z: number) {
@@ -1150,18 +1505,31 @@ function fuse(parts: THREE.BufferGeometry[]) {
   return merged;
 }
 
-function pack(text: THREE.BufferGeometry, base: THREE.BufferGeometry, warnings: string[]): KeychainModel {
+function pack(
+  text: THREE.BufferGeometry,
+  base: THREE.BufferGeometry,
+  warnings: string[],
+  anchor?: { anchorX: number; anchorY: number; charmBounds: KeychainModel["charmBounds"] },
+): KeychainModel {
   text.computeBoundingBox();
   base.computeBoundingBox();
   const box = new THREE.Box3();
   if (text.boundingBox) box.union(text.boundingBox);
   if (base.boundingBox) box.union(base.boundingBox);
   if (box.isEmpty() || !Number.isFinite(box.min.x)) throw new Error("That model has no printable shape.");
-  const centerX = (box.min.x + box.max.x) / 2;
-  const centerY = (box.min.y + box.max.y) / 2;
+  const centerX = anchor?.anchorX ?? (box.min.x + box.max.x) / 2;
+  const centerY = anchor?.anchorY ?? (box.min.y + box.max.y) / 2;
   text.translate(-centerX, -centerY, -box.min.z);
   base.translate(-centerX, -centerY, -box.min.z);
   const size = box.getSize(new THREE.Vector3());
+  const charmBounds = anchor?.charmBounds
+    ? {
+        minX: anchor.charmBounds.minX - centerX,
+        minY: anchor.charmBounds.minY - centerY,
+        maxX: anchor.charmBounds.maxX - centerX,
+        maxY: anchor.charmBounds.maxY - centerY,
+      }
+    : null;
   return {
     text,
     base,
@@ -1169,6 +1537,8 @@ function pack(text: THREE.BufferGeometry, base: THREE.BufferGeometry, warnings: 
     height: size.y,
     depth: size.z,
     warnings,
+    charmBounds,
+    hole: null,
   };
 }
 

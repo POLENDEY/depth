@@ -2,6 +2,7 @@ import ClipperLib from "clipper-lib";
 import type { Path, Paths, PolyTree } from "clipper-lib";
 import type { Font, PathCommand } from "opentype.js";
 import * as THREE from "three";
+import { charmRings, isEmojiCharm } from "./charms";
 
 export type HoleSide = "left" | "right";
 export type MeshQuality = "preview" | "print";
@@ -15,7 +16,12 @@ export type KeychainParams = {
   holeSide: HoleSide;
   baseThickness: number;
   textThickness: number;
-  charm: boolean;
+  charm: string;
+  charmX: number;
+  charmY: number;
+  charmSize: number;
+  holeOffsetX: number;
+  holeOffsetY: number;
 };
 
 export type KeychainModel = {
@@ -25,6 +31,8 @@ export type KeychainModel = {
   height: number;
   depth: number;
   warnings: string[];
+  charmBounds: { minX: number; minY: number; maxX: number; maxY: number } | null;
+  hole: { x: number; y: number; radius: number } | null;
 };
 
 type Point = { x: number; y: number };
@@ -40,6 +48,9 @@ export const LIMITS = {
   holeDiameter: [3, 8] as const,
   baseThickness: [0.8, 6] as const,
   textThickness: [0.4, 4] as const,
+  charmSize: [8, 64] as const,
+  holeOffsetX: [-120, 120] as const,
+  holeOffsetY: [-80, 80] as const,
   characters: MAX_CHARS,
 };
 
@@ -48,10 +59,17 @@ const QUALITY = {
   print: { maxCurveSteps: 12, circleSegments: 56, arcTolerance: 0.06 },
 } as const;
 
-const profileCache = new Map<
-  string,
-  { textShapes: THREE.Shape[]; baseShapes: THREE.Shape[]; warnings: string[] }
->();
+const profileCache = new Map<string, Profile>();
+
+type Profile = {
+  textShapes: THREE.Shape[];
+  baseShapes: THREE.Shape[];
+  warnings: string[];
+  charmBounds: { minX: number; minY: number; maxX: number; maxY: number } | null;
+  hole: { x: number; y: number; radius: number } | null;
+  centerX: number;
+  centerY: number;
+};
 
 export function buildKeychain(
   font: Font,
@@ -71,6 +89,23 @@ export function buildKeychain(
     holeDiameter: clamp(params.holeDiameter, LIMITS.holeDiameter[0], LIMITS.holeDiameter[1]),
     baseThickness: clamp(params.baseThickness, LIMITS.baseThickness[0], LIMITS.baseThickness[1]),
     textThickness: clamp(params.textThickness, LIMITS.textThickness[0], LIMITS.textThickness[1]),
+    charmX: Number.isFinite(params.charmX) ? params.charmX : 0,
+    charmY: Number.isFinite(params.charmY) ? params.charmY : 0,
+    charmSize: clamp(
+      Number.isFinite(params.charmSize) ? params.charmSize : params.letterHeight * 1.42,
+      LIMITS.charmSize[0],
+      LIMITS.charmSize[1],
+    ),
+    holeOffsetX: clamp(
+      Number.isFinite(params.holeOffsetX) ? params.holeOffsetX : 0,
+      LIMITS.holeOffsetX[0],
+      LIMITS.holeOffsetX[1],
+    ),
+    holeOffsetY: clamp(
+      Number.isFinite(params.holeOffsetY) ? params.holeOffsetY : 0,
+      LIMITS.holeOffsetY[0],
+      LIMITS.holeOffsetY[1],
+    ),
   };
 
   const profile = getProfile(font, safe, quality);
@@ -86,8 +121,8 @@ export function buildKeychain(
       ),
     );
 
-  const centerX = (box.min.x + box.max.x) / 2;
-  const centerY = (box.min.y + box.max.y) / 2;
+  const centerX = profile.centerX;
+  const centerY = profile.centerY;
   textGeometry.translate(-centerX, -centerY, -box.min.z);
   baseGeometry.translate(-centerX, -centerY, -box.min.z);
 
@@ -103,6 +138,18 @@ export function buildKeychain(
     warnings.push("This is very small. Raise the letter height so the letters stay printable.");
   }
 
+  const charmBounds = profile.charmBounds
+    ? {
+        minX: profile.charmBounds.minX - centerX,
+        minY: profile.charmBounds.minY - centerY,
+        maxX: profile.charmBounds.maxX - centerX,
+        maxY: profile.charmBounds.maxY - centerY,
+      }
+    : null;
+  const hole = profile.hole
+    ? { x: profile.hole.x - centerX, y: profile.hole.y - centerY, radius: profile.hole.radius }
+    : null;
+
   return {
     text: textGeometry,
     base: baseGeometry,
@@ -110,6 +157,8 @@ export function buildKeychain(
     height: size.y,
     depth: safe.baseThickness + safe.textThickness,
     warnings,
+    charmBounds,
+    hole,
   };
 }
 
@@ -123,6 +172,11 @@ function getProfile(font: Font, params: KeychainParams, quality: MeshQuality) {
     params.holeDiameter.toFixed(2),
     params.holeSide,
     params.charm,
+    params.charmX.toFixed(2),
+    params.charmY.toFixed(2),
+    params.charmSize.toFixed(2),
+    params.holeOffsetX.toFixed(2),
+    params.holeOffsetY.toFixed(2),
     quality,
   ].join("|");
 
@@ -140,48 +194,43 @@ function getProfile(font: Font, params: KeychainParams, quality: MeshQuality) {
   if (!rings.length) {
     throw new Error("That text has no printable outlines. Try letters or numbers.");
   }
+  const letters = ringBounds(rings);
+  const centerX = (letters.minX + letters.maxX) / 2;
+  const centerY = (letters.minY + letters.maxY) / 2;
 
-  if (params.charm) {
-    const bounds = ringBounds(rings);
-    rings.push(
-      ...pawRings(
-        bounds.maxX,
-        bounds.maxY,
-        Math.max(8, bounds.maxY - bounds.minY),
-        settings.circleSegments,
-      ),
-    );
-  }
+  const charmPiece = appendCharm(
+    params.charm,
+    params.charmX,
+    params.charmY,
+    params.charmSize,
+    letters.maxX,
+    centerY,
+    params.outline,
+  );
+  const charmBounds = charmPiece.bounds;
+  const charmPaths = charmPiece.text;
 
-  const textPaths = clean(unionPaths(toClipper(rings)));
-  if (!textPaths.length) {
+  const letterPaths = clean(unionPaths(toClipper(rings)));
+  if (!letterPaths.length) {
     throw new Error("The letters could not be combined. Try a different font.");
   }
+  const textPaths = charmPaths.length ? clean(unionPaths([...letterPaths, ...charmPaths])) : letterPaths;
 
-  let basePaths = offsetPaths(textPaths, params.outline, settings.arcTolerance);
-  const textWidth = spanX(textPaths);
-  if (spanX(basePaths) + 0.2 < textWidth) {
-    basePaths = offsetPaths(reversePaths(textPaths), params.outline, settings.arcTolerance);
+  let basePaths = offsetPaths(letterPaths, params.outline, settings.arcTolerance);
+  if (spanX(basePaths) + 0.2 < spanX(letterPaths)) {
+    basePaths = offsetPaths(reversePaths(letterPaths), params.outline, settings.arcTolerance);
   }
+  const letterBox = pathBounds(basePaths);
+  if (charmPiece.base.length) basePaths = [...basePaths, ...charmPiece.base];
   basePaths = clean(unionPaths(basePaths));
   if (!basePaths.length) {
     throw new Error("The outline collapsed. Increase the outline width slightly.");
   }
 
-  if (params.holeEnabled) {
-    const bounds = pathBounds(basePaths);
-    const holeRadius = params.holeDiameter / 2;
-    const wall = Math.max(1.8, params.outline * 0.6);
-    const outerRadius = holeRadius + wall;
-    const midY = (bounds.minY + bounds.maxY) / 2;
-    const centerX =
-      params.holeSide === "left"
-        ? bounds.minX - holeRadius * 0.55
-        : bounds.maxX + holeRadius * 0.55;
-    const outer = circlePath(centerX, midY, outerRadius, settings.circleSegments);
-    const inner = circlePath(centerX, midY, holeRadius, settings.circleSegments);
-    const withTab = clean(unionPaths([...basePaths, outer]));
-    const tree = difference(withTab, inner);
+  const holeSpot = params.holeEnabled ? placeHole(letterBox, params, settings.circleSegments) : null;
+  if (holeSpot) {
+    const withTab = clean(unionPaths([...basePaths, holeSpot.outer]));
+    const tree = difference(withTab, holeSpot.inner);
     const shapes = exPolygonsToShapes(tree);
     if (!shapes.holeCount) {
       warnings.push("The keyring hole did not cut through. Increase the hole or move it outward.");
@@ -190,6 +239,10 @@ function getProfile(font: Font, params: KeychainParams, quality: MeshQuality) {
       textShapes: pathsToShapes(textPaths),
       baseShapes: shapes.shapes,
       warnings,
+      charmBounds,
+      hole: { x: holeSpot.x, y: holeSpot.y, radius: holeSpot.radius },
+      centerX,
+      centerY,
     };
     remember(key, profile);
     return profile;
@@ -199,15 +252,33 @@ function getProfile(font: Font, params: KeychainParams, quality: MeshQuality) {
     textShapes: pathsToShapes(textPaths),
     baseShapes: pathsToShapes(basePaths),
     warnings,
+    charmBounds,
+    hole: null,
+    centerX,
+    centerY,
   };
   remember(key, profile);
   return profile;
 }
 
-function remember(
-  key: string,
-  profile: { textShapes: THREE.Shape[]; baseShapes: THREE.Shape[]; warnings: string[] },
-) {
+function boundsOfRings(rings: Ring[]) {
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const ring of rings) {
+    for (const point of ring) {
+      minX = Math.min(minX, point.x);
+      minY = Math.min(minY, point.y);
+      maxX = Math.max(maxX, point.x);
+      maxY = Math.max(maxY, point.y);
+    }
+  }
+  if (!Number.isFinite(minX)) return null;
+  return { minX, minY, maxX, maxY };
+}
+
+function remember(key: string, profile: Profile) {
   profileCache.set(key, profile);
   if (profileCache.size > 12) {
     const oldest = profileCache.keys().next().value;
@@ -333,20 +404,6 @@ function quadratic(p0: Point, p1: Point, p2: Point, t: number): Point {
   };
 }
 
-function pawRings(maxX: number, maxY: number, letterHeight: number, segments: number) {
-  const scale = letterHeight * 0.62;
-  const padR = scale * 0.34;
-  const toeR = scale * 0.16;
-  const cx = maxX - padR * 0.15;
-  const cy = maxY - padR * 0.05;
-  return [
-    circleRing(cx, cy - padR * 0.15, padR, segments),
-    circleRing(cx - toeR * 1.35, cy + padR * 0.85, toeR, segments),
-    circleRing(cx, cy + padR * 1.15, toeR * 0.95, segments),
-    circleRing(cx + toeR * 1.35, cy + padR * 0.85, toeR, segments),
-  ];
-}
-
 function circleRing(cx: number, cy: number, radius: number, segments: number): Ring {
   const ring: Ring = [];
   for (let index = 0; index < segments; index += 1) {
@@ -415,6 +472,187 @@ function clean(paths: Paths, distanceMm = 0.02, scale = SCALE) {
 
 function reversePaths(paths: Paths) {
   return paths.map((path) => [...path].reverse());
+}
+
+function appendCharm(
+  charm: string,
+  offsetX: number,
+  offsetY: number,
+  size: number,
+  anchorX: number,
+  anchorY: number,
+  outline: number,
+) {
+  if (!charm) return { text: [] as Paths, base: [] as Paths, bounds: null as Profile["charmBounds"] };
+  const placed = charmRings(charm, anchorX + size * 0.24 + offsetX, anchorY + offsetY, size, 48);
+  const bounds = boundsOfRings(placed.filter((part) => !part.hole).map((part) => part.points));
+  if (!placed.length) return { text: [] as Paths, base: [] as Paths, bounds };
+  const charmArc = 0.012;
+  let charmPaths = clean(unionPaths(toClipper(placed.map((part) => part.points))), 0.004);
+  const welded = offsetPaths(charmPaths, 0.04, charmArc);
+  if (spanX(welded) + 0.2 >= spanX(charmPaths)) charmPaths = clean(welded, 0.004);
+  let plate: Paths = [];
+  if (isEmojiCharm(charm)) {
+    const sealed = sealEmoji(charmPaths);
+    charmPaths = sealed.features;
+    plate = sealed.plate;
+  }
+  const charmOutline = Math.max(1.05, outline * 0.55);
+  let charmBase = offsetPaths(charmPaths, charmOutline, charmArc);
+  if (spanX(charmBase) + 0.2 < spanX(charmPaths)) {
+    charmBase = offsetPaths(reversePaths(charmPaths), charmOutline, charmArc);
+  }
+  return { text: charmPaths, base: [...charmBase, ...plate], bounds };
+}
+
+function placeHole(
+  letterBox: { minX: number; minY: number; maxX: number; maxY: number },
+  params: KeychainParams,
+  segments: number,
+) {
+  const holeRadius = params.holeDiameter / 2;
+  const wall = Math.max(1.8, params.outline * 0.6);
+  const outerRadius = holeRadius + wall;
+  const anchorX =
+    params.holeSide === "left" ? letterBox.minX - holeRadius * 0.55 : letterBox.maxX + holeRadius * 0.55;
+  const anchorY = (letterBox.minY + letterBox.maxY) / 2;
+  const x = anchorX + params.holeOffsetX;
+  const y = anchorY + params.holeOffsetY;
+  return {
+    x,
+    y,
+    radius: outerRadius,
+    outer: circlePath(x, y, outerRadius, segments),
+    inner: circlePath(x, y, holeRadius, segments),
+  };
+}
+
+function sealEmoji(paths: Paths) {
+  const polygons = ClipperLib.JS.PolyTreeToExPolygons(pathsToTree(paths));
+  let maxSpan = 0;
+  for (const polygon of polygons) maxSpan = Math.max(maxSpan, radialStats(polygon.outer).span);
+  if (maxSpan <= 0) return { features: paths, plate: [] as Paths };
+
+  let minY = Infinity;
+  let maxY = -Infinity;
+  for (const polygon of polygons) {
+    const stats = radialStats(polygon.outer);
+    minY = Math.min(minY, stats.minY);
+    maxY = Math.max(maxY, stats.maxY);
+  }
+  const midY = (minY + maxY) / 2;
+
+  let ring: Path | null = null;
+  let faceStats: ReturnType<typeof radialStats> | null = null;
+  for (const polygon of polygons) {
+    const stats = radialStats(polygon.outer);
+    if (stats.span < maxSpan * 0.72) continue;
+    if (faceStats && stats.span < faceStats.span) continue;
+    const disk = Math.PI * (stats.span / 2) ** 2;
+    if (Math.abs(pathArea(polygon.outer)) > disk * 0.2) continue;
+    ring = polygon.outer;
+    faceStats = stats;
+  }
+
+  let faceHole: Path | null = null;
+  let plate: Paths = [];
+  if (ring && faceStats) {
+    const spot = inscribed(ring);
+    plate = [circlePath(spot.x / SCALE, spot.y / SCALE, spot.distance / SCALE + 0.28, 96)];
+    faceStats = { ...faceStats, cx: spot.x, cy: spot.y };
+  } else {
+    for (const polygon of polygons) {
+      for (const hole of polygon.holes) {
+        const stats = radialStats(hole);
+        if (stats.span < maxSpan * 0.45 || Math.abs(stats.cy - midY) > maxSpan * 0.35) continue;
+        if (!faceStats || stats.span > faceStats.span) {
+          faceHole = hole;
+          faceStats = stats;
+        }
+      }
+    }
+    if (faceHole) {
+      const outer = asOuter(faceHole);
+      const grown = offsetPaths([outer], 0.22, 0.012);
+      plate = spanX(grown) + 0.2 >= spanX([outer]) ? grown : [outer];
+    }
+  }
+  if (!faceStats || !plate.length) return { features: paths, plate: [] as Paths };
+
+  const eyePaths: Path[] = [];
+  for (const polygon of polygons) {
+    const parent = radialStats(polygon.outer);
+    const outside = Math.hypot(parent.cx - faceStats.cx, parent.cy - faceStats.cy) > faceStats.span * 0.55;
+    for (const hole of polygon.holes) {
+      if (hole === faceHole) continue;
+      const stats = radialStats(hole);
+      if (Math.abs(pathArea(hole)) / (SCALE * SCALE) < 0.8) continue;
+      if (stats.span > faceStats.span * 0.4) continue;
+      if (stats.cy <= faceStats.cy && !outside) continue;
+      eyePaths.push(asOuter(hole));
+    }
+  }
+
+  const features = eyePaths.length ? clean(unionPaths([...paths, ...eyePaths]), 0.004) : paths;
+  return { features, plate };
+}
+
+function inscribed(path: Path) {
+  const bounds = radialStats(path);
+  let bestX = bounds.cx;
+  let bestY = bounds.cy;
+  let best = 0;
+  const steps = 22;
+  for (let iy = 0; iy <= steps; iy += 1) {
+    for (let ix = 0; ix <= steps; ix += 1) {
+      const x = bounds.minX + ((bounds.maxX - bounds.minX) * ix) / steps;
+      const y = bounds.minY + ((bounds.maxY - bounds.minY) * iy) / steps;
+      let nearest = Infinity;
+      for (const point of path) {
+        const distance = Math.hypot(point.X - x, point.Y - y);
+        if (distance < nearest) nearest = distance;
+      }
+      if (nearest > best) {
+        best = nearest;
+        bestX = x;
+        bestY = y;
+      }
+    }
+  }
+  return { x: bestX, y: bestY, distance: best };
+}
+
+function asOuter(path: Path) {
+  return pathArea(path) < 0 ? [...path].reverse() : path.slice();
+}
+
+function radialStats(path: Path) {
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const point of path) {
+    minX = Math.min(minX, point.X);
+    minY = Math.min(minY, point.Y);
+    maxX = Math.max(maxX, point.X);
+    maxY = Math.max(maxY, point.Y);
+  }
+  const cx = (minX + maxX) / 2;
+  const cy = (minY + maxY) / 2;
+  const radii = path.map((point) => Math.hypot(point.X - cx, point.Y - cy)).sort((a, b) => a - b);
+  const mean = radii.reduce((sum, value) => sum + value, 0) / Math.max(1, radii.length);
+  const variance = radii.reduce((sum, value) => sum + (value - mean) ** 2, 0) / Math.max(1, radii.length);
+  return {
+    cx,
+    cy,
+    minX,
+    minY,
+    maxX,
+    maxY,
+    span: Math.max(maxX - minX, maxY - minY),
+    cv: mean > 0 ? Math.sqrt(variance) / mean : 1,
+    p15: radii[Math.floor(radii.length * 0.15)] ?? 0,
+  };
 }
 
 function pathsToShapes(paths: Paths, scale = SCALE) {
@@ -618,7 +856,14 @@ function spanX(paths: Paths) {
   return bounds.maxX - bounds.minX;
 }
 
-export function outlinedMagnet(font: Font, text: string, letterHeight: number, outline: number, pocketRadius: number) {
+export function outlinedMagnet(
+  font: Font,
+  text: string,
+  letterHeight: number,
+  outline: number,
+  pocketRadius: number,
+  charm: { id: string; x: number; y: number; size: number } = { id: "", x: 0, y: 0, size: 26 },
+) {
   const raw = text.normalize("NFC").trim().slice(0, MAX_CHARS);
   if (!raw) throw new Error("Type a name to generate this model.");
   const missing = missingGlyphs(font, raw);
@@ -627,24 +872,35 @@ export function outlinedMagnet(font: Font, text: string, letterHeight: number, o
     : [];
   const rings = textToRings(font, raw, letterHeight, 36, 0.4);
   if (!rings.length) throw new Error("That text has no printable outlines. Try letters or numbers.");
-  const textPaths = clean(unionPaths(toClipper(rings)), 0.004);
-  if (!textPaths.length) throw new Error("The letters could not be combined. Try a different font.");
-  let basePaths = offsetPaths(textPaths, outline, 0.012);
-  if (spanX(basePaths) + 0.2 < spanX(textPaths)) {
-    basePaths = offsetPaths(reversePaths(textPaths), outline, 0.012);
+  const letters = ringBounds(rings);
+  const centerX = (letters.minX + letters.maxX) / 2;
+  const centerY = (letters.minY + letters.maxY) / 2;
+  const letterPaths = clean(unionPaths(toClipper(rings)), 0.004);
+  if (!letterPaths.length) throw new Error("The letters could not be combined. Try a different font.");
+  let letterBase = offsetPaths(letterPaths, outline, 0.012);
+  if (spanX(letterBase) + 0.2 < spanX(letterPaths)) {
+    letterBase = offsetPaths(reversePaths(letterPaths), outline, 0.012);
   }
-  basePaths = clean(unionPaths(basePaths), 0.008);
-  if (!basePaths.length) throw new Error("The outline collapsed. Increase the outline width slightly.");
-  const pocket = placePocket(basePaths, pocketRadius);
+  letterBase = clean(unionPaths(letterBase), 0.008);
+  if (!letterBase.length) throw new Error("The outline collapsed. Increase the outline width slightly.");
+  const piece = appendCharm(charm.id, charm.x, charm.y, charm.size, letters.maxX, centerY, outline);
+  const textPaths = piece.text.length ? clean(unionPaths([...letterPaths, ...piece.text]), 0.004) : letterPaths;
+  const solidPaths = piece.base.length ? clean(unionPaths([...letterBase, ...piece.base]), 0.008) : letterBase;
+  const pocket = placePocket(letterBase, pocketRadius);
   if (pocket.radius > 0 && pocket.radius + 0.05 < pocketRadius) {
     warnings.push("The magnet was made smaller so it stays inside the name.");
   }
   if (!pocket.shapes) warnings.push("The name is too small for a magnet pocket. Raise the letter height.");
+  const pocketPaths =
+    pocket.paths && piece.base.length ? clean(unionPaths([...pocket.paths, ...piece.base]), 0.008) : pocket.paths;
   return {
     textShapes: pathsToShapes(textPaths),
-    baseShapes: pathsToShapes(basePaths),
-    pocketShapes: pocket.shapes,
+    baseShapes: pathsToShapes(solidPaths),
+    pocketShapes: pocketPaths ? pathsToShapes(pocketPaths) : pocket.shapes,
     warnings,
+    centerX,
+    centerY,
+    charmBounds: piece.bounds,
   };
 }
 
@@ -660,12 +916,19 @@ function placePocket(basePaths: Paths, radius: number) {
   while (size >= 1.5) {
     const spot = findPocket(polygons, bounds, centerX, centerY, size);
     if (spot) {
-      const cut = exPolygonsToShapes(difference(basePaths, circlePath(spot.x, spot.y, size, 128)));
-      if (cut.holeCount) return { shapes: cut.shapes, radius: size };
+      const tree = difference(basePaths, circlePath(spot.x, spot.y, size, 128));
+      const cut = exPolygonsToShapes(tree);
+      if (cut.holeCount) {
+        return {
+          shapes: cut.shapes,
+          paths: clean(ClipperLib.Clipper.PolyTreeToPaths(tree), 0.008),
+          radius: size,
+        };
+      }
     }
     size = Math.round((size - 0.5) * 10) / 10;
   }
-  return { shapes: null as THREE.Shape[] | null, radius: 0 };
+  return { shapes: null as THREE.Shape[] | null, paths: null as Paths | null, radius: 0 };
 }
 
 function findPocket(

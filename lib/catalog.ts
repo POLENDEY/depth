@@ -3,6 +3,7 @@ import { SAMPLE_SPOTIFY_BARS } from "./spotify-code";
 export type Pattern = "vertical" | "square" | "smooth";
 export type Relief = "embossed" | "debossed";
 export type TextFlow = "vertical" | "horizontal";
+export type LinkStyle = "tile" | "block";
 
 export const TAG_GROUPS = [
   {
@@ -74,6 +75,13 @@ export type ProductSettings = {
   debossDepth: number;
   textFlow: TextFlow;
   linkHeight: number;
+  linkSize: number;
+  letterGap: number;
+  linkStyle: LinkStyle;
+  charm: string;
+  charmX: number;
+  charmY: number;
+  charmSize: number;
   tagSize: number;
   tagShape: TagShape;
   pattern: Pattern;
@@ -93,6 +101,8 @@ export type Field =
   | { type: "back-text"; label: string; maxChars?: number }
   | { type: "relief"; label: string }
   | { type: "text-flow"; label: string }
+  | { type: "link-style"; label: string }
+  | { type: "charm" }
   | { type: "colors"; text: string; base: string };
 
 export type Product = {
@@ -121,6 +131,13 @@ const shared = {
   debossDepth: 0.8,
   textFlow: "vertical" as TextFlow,
   linkHeight: 18,
+  linkSize: 6,
+  letterGap: 0,
+  linkStyle: "tile" as LinkStyle,
+  charm: "",
+  charmX: 0,
+  charmY: 0,
+  charmSize: 26,
   tagSize: 48,
   tagShape: "circle" as TagShape,
   pattern: "vertical" as Pattern,
@@ -251,13 +268,17 @@ export const PRODUCTS: Product[] = [
       textThickness: 1.2,
       baseThickness: 5,
       linkHeight: 18,
+      linkStyle: "block",
       holeDiameter: 5,
     },
     fields: [
       { type: "text", label: "Name" },
       { type: "font" },
+      { type: "link-style", label: "Style" },
       { type: "number", key: "letterHeight", label: "Letter height", min: 8, max: 32, step: 0.5 },
       { type: "number", key: "linkHeight", label: "Link height", min: 12, max: 40, step: 0.5 },
+      { type: "number", key: "linkSize", label: "Link size", min: 5, max: 14, step: 0.5 },
+      { type: "number", key: "letterGap", label: "Letter distance", min: 0, max: 24, step: 0.5 },
       { type: "number", key: "baseThickness", label: "Body thickness", min: 4.8, max: 8, step: 0.1 },
       { type: "number", key: "textThickness", label: "Letter thickness", min: 0.8, max: 3, step: 0.1 },
       { type: "number", key: "holeDiameter", label: "Hole diameter", min: 3, max: 8, step: 0.1 },
@@ -410,10 +431,12 @@ export const PRODUCTS: Product[] = [
       textThickness: 1.8,
       baseThickness: 3,
       magnetDiameter: 8,
+      charmSize: 40,
     },
     fields: [
       { type: "text", label: "Name" },
       { type: "font" },
+      { type: "charm" },
       { type: "number", key: "letterHeight", label: "Letter height", min: 12, max: 48, step: 0.5 },
       { type: "number", key: "outline", label: "Outline", min: 1.4, max: 6, step: 0.1 },
       { type: "number", key: "textThickness", label: "Letter thickness", min: 0.8, max: 3.2, step: 0.1 },

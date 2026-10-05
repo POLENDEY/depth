@@ -24,7 +24,7 @@ import { unzipSync } from "fflate";
 import { PRODUCTS } from "../lib/catalog";
 import { buildKeychain } from "../lib/geometry";
 import { exportKeychain } from "../lib/export";
-import { assertArticulatedHingeRound, buildProduct } from "../lib/models";
+import { assertArticulatedHingeRound, assertBlockChain, buildProduct } from "../lib/models";
 
 const defaults = {
   text: "PAUL",
@@ -35,7 +35,12 @@ const defaults = {
   holeSide: "left" as const,
   baseThickness: 2.4,
   textThickness: 1.6,
-  charm: false,
+  charm: "",
+  charmX: 0,
+  charmY: 0,
+  charmSize: 26,
+  holeOffsetX: 0,
+  holeOffsetY: 0,
 };
 
 function parseFont(file: string) {
@@ -132,6 +137,7 @@ async function main() {
   }
 
   assertArticulatedHingeRound();
+  assertBlockChain();
 
   model.text.dispose();
   model.base.dispose();
