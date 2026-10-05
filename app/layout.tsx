@@ -24,7 +24,12 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
           crossOrigin="anonymous"
         />
       </head>
-      <body className="min-h-full bg-[#f4f5f7] text-zinc-900">{children}</body>
+      <body className="flex min-h-full flex-col bg-[#f4f5f7] text-zinc-900">
+        {children}
+        <footer className="mt-auto border-t border-[#e6e7ec] px-5 py-4 text-center text-xs text-zinc-500">
+          Developer: John Paul Polendey
+        </footer>
+      </body>
     </html>
   );
 }
