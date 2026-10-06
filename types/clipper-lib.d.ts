@@ -36,6 +36,7 @@ declare module "clipper-lib" {
 
   export class ClipperOffset {
     constructor(miterLimit?: number, arcTolerance?: number);
+    AddPath(path: Path, joinType: number, endType: number): void;
     AddPaths(paths: Paths, joinType: number, endType: number): void;
     Execute(solution: Paths, delta: number): void;
   }
@@ -49,7 +50,11 @@ declare module "clipper-lib" {
     PolyType: { ptSubject: number; ptClip: number };
     PolyFillType: { pftNonZero: number };
     JoinType: { jtRound: number };
-    EndType: { etClosedPolygon: number };
+    EndType: {
+      etClosedPolygon: number;
+      etClosedLine: number;
+      etOpenRound: number;
+    };
     JS: {
       PolyTreeToExPolygons(tree: PolyTree): ExPolygon[];
     };

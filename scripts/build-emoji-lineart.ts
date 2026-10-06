@@ -225,7 +225,7 @@ function parsePath(d: string) {
       prevCubic = null;
     } else if (command === "T" || command === "t") {
       const raw = [read(), read()];
-      const p1 = prevQuad ? { x: 2 * here.x - prevQuad.x, y: 2 * here.y - prevQuad.y } : here;
+      const p1: Vec = prevQuad ? { x: 2 * here.x - prevQuad.x, y: 2 * here.y - prevQuad.y } : here;
       const p2 = { x: relative ? here.x + raw[0] : raw[0], y: relative ? here.y + raw[1] : raw[1] };
       push(quadratic(here, p1, p2));
       prevQuad = p1;

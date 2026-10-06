@@ -12,7 +12,7 @@ export type Charm = {
 type Point = { x: number; y: number };
 type Part = { points: Point[]; hole?: boolean };
 
-const LINEART = lineart as Record<string, [number, number][][]>;
+const LINEART = lineart as unknown as Record<string, [number, number][][]>;
 
 function emojiArt(id: string): Part[] {
   return (LINEART[id] ?? []).map((ring) => ({
