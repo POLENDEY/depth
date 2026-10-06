@@ -32,6 +32,7 @@ declare module "clipper-lib" {
     ): boolean;
     static PolyTreeToPaths(tree: PolyTree): Paths;
     static CleanPolygons(paths: Paths, distance: number): Paths;
+    static PointInPolygon(point: IntPoint, path: Path): number;
   }
 
   export class ClipperOffset {

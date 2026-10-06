@@ -1037,12 +1037,15 @@ function magnet(font: Font, settings: ProductSettings, _quality: MeshQuality, _c
   const outline = clamp(settings.outline, 1.4, 6);
   const bodyDepth = clamp(settings.baseThickness, 1.8, 6);
   const letterDepth = clamp(settings.textThickness, 0.8, 3.2);
-  const profile = outlinedMagnet(font, settings.text, letterHeight, outline, clamp(settings.magnetDiameter, 4, 18) / 2, {
-    id: settings.charm,
-    x: settings.charmX,
-    y: settings.charmY,
-    size: settings.charmSize,
-  });
+  const profile = outlinedMagnet(
+    font,
+    settings.text,
+    letterHeight,
+    outline,
+    clamp(settings.magnetDiameter, 4, 18) / 2,
+    settings.charms,
+    settings.charmBase,
+  );
   const floor = 0.8;
   const pocketDepth = profile.pocketShapes ? Math.max(0.8, bodyDepth - floor) : 0;
   const letters = extrudeShapes(profile.textShapes, letterDepth + FUSE, 2);
@@ -1522,14 +1525,12 @@ function pack(
   text.translate(-centerX, -centerY, -box.min.z);
   base.translate(-centerX, -centerY, -box.min.z);
   const size = box.getSize(new THREE.Vector3());
-  const charmBounds = anchor?.charmBounds
-    ? {
-        minX: anchor.charmBounds.minX - centerX,
-        minY: anchor.charmBounds.minY - centerY,
-        maxX: anchor.charmBounds.maxX - centerX,
-        maxY: anchor.charmBounds.maxY - centerY,
-      }
-    : null;
+  const charmBounds = (anchor?.charmBounds ?? []).map((box) => ({
+    minX: box.minX - centerX,
+    minY: box.minY - centerY,
+    maxX: box.maxX - centerX,
+    maxY: box.maxY - centerY,
+  }));
   return {
     text,
     base,

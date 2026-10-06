@@ -5,8 +5,9 @@ import { Viewer } from "@/components/viewer";
 import { downloadBlob, EXPORT_FORMATS, exportKeychain, slugify, type ExportFormat } from "@/lib/export";
 import { FontField } from "@/components/font-field";
 import { useFontLibrary } from "@/lib/font-library";
-import { CharmPicker } from "@/components/charm-picker";
-import { buildKeychain, LIMITS, type HoleSide, type KeychainModel, type KeychainParams } from "@/lib/geometry";
+import { CharmPicker, CharmStrip } from "@/components/charm-picker";
+import { ensureCharmArt } from "@/lib/charms";
+import { buildKeychain, LIMITS, MAX_CHARMS, withCharm, type HoleSide, type KeychainModel, type KeychainParams } from "@/lib/geometry";
 import { formatSize, fromDisplay, toDisplay, type Unit } from "@/lib/units";
 
 type Settings = KeychainParams & {
@@ -27,10 +28,8 @@ const INITIAL: Settings = {
   holeOffsetY: 0,
   baseThickness: 2.4,
   textThickness: 1.6,
-  charm: "",
-  charmX: 0,
-  charmY: 0,
-  charmSize: 26,
+  charms: [],
+  charmBase: 1.2,
   textColor: "#f4f4f5",
   baseColor: "#8b78f2",
 };
@@ -50,6 +49,7 @@ export function Studio() {
   const [building, setBuilding] = useState(true);
   const [exporting, setExporting] = useState(false);
   const [more, setMore] = useState(false);
+  const [selectedCharm, setSelectedCharm] = useState(0);
   const fonts = useFontLibrary();
 
   const geometryKey = useMemo(
@@ -66,10 +66,8 @@ export function Studio() {
         holeOffsetY: settings.holeOffsetY,
         baseThickness: settings.baseThickness,
         textThickness: settings.textThickness,
-        charm: settings.charm,
-        charmX: settings.charmX,
-        charmY: settings.charmY,
-        charmSize: settings.charmSize,
+        charms: settings.charms,
+        charmBase: settings.charmBase,
       }),
     [settings],
   );
@@ -97,6 +95,7 @@ export function Studio() {
       void (async () => {
         try {
           const font = await fonts.load(params.fontId);
+          await Promise.all(params.charms.map((charm) => ensureCharmArt(charm.id)));
           if (cancel) return;
           const next = buildKeychain(font, params, "preview");
           if (cancel) {
@@ -127,6 +126,7 @@ export function Studio() {
     setExporting(true);
     try {
       const font = await fonts.load(settings.fontId);
+      await Promise.all(settings.charms.map((charm) => ensureCharmArt(charm.id)));
       const printModel = buildKeychain(font, settings, "print");
       try {
         const file = await exportKeychain(
@@ -188,11 +188,18 @@ export function Studio() {
             model={visibleModel}
             textColor={settings.textColor}
             baseColor={settings.baseColor}
-            charmX={settings.charmX}
-            charmY={settings.charmY}
+            charms={settings.charms}
             onCharmMove={
-              settings.charm
-                ? (x, y) => patch({ charmX: x, charmY: y })
+              settings.charms.length
+                ? (index, x, y) => {
+                    setSelectedCharm(index);
+                    setSettings((current) => ({
+                      ...current,
+                      charms: current.charms.map((charm, charmIndex) =>
+                        charmIndex === index ? { ...charm, x, y } : charm,
+                      ),
+                    }));
+                  }
                 : undefined
             }
             holeX={settings.holeOffsetX}
@@ -210,8 +217,8 @@ export function Studio() {
               </p>
               {sizeInches ? <p className="text-xs tabular-nums text-zinc-500">{sizeInches}</p> : null}
               <p className="text-xs text-zinc-400">
-                {settings.charm
-                  ? "Drag the icon or the keyring hole on its own · Drag empty space to orbit"
+                {settings.charms.length
+                  ? "Drag an emoji or the keyring hole on its own · Drag empty space to orbit"
                   : settings.holeEnabled
                     ? "Drag the keyring hole to move it · Drag empty space to orbit"
                     : "Drag to orbit · Shift+drag to pan · Scroll to zoom"}
@@ -278,8 +285,19 @@ export function Studio() {
               className="h-10 min-w-0 flex-1 rounded-lg border border-[#d7f3e4] bg-[#e7f9ef] px-3 text-base text-zinc-900 outline-none focus:border-[#8ed4ad] focus:bg-[#dff6e8]"
             />
             <CharmPicker
-              value={settings.charm}
-              onChange={(charm) => patch({ charm, charmX: 0, charmY: 0 })}
+              onAdd={(id) => {
+                const next = withCharm(settings.charms, id, 26);
+                if (next.length === settings.charms.length) {
+                  setError(`You can add up to ${MAX_CHARMS} emojis.`);
+                  return;
+                }
+                setSelectedCharm(next.length - 1);
+                patch({ charms: next });
+              }}
+              onClear={() => {
+                setSelectedCharm(0);
+                patch({ charms: [] });
+              }}
             />
             <button
               type="button"
@@ -290,6 +308,16 @@ export function Studio() {
               <ResetIcon />
             </button>
           </div>
+          <CharmStrip
+            charms={settings.charms}
+            selected={selectedCharm}
+            onSelect={setSelectedCharm}
+            onRemove={(index) => {
+              const next = settings.charms.filter((_, charmIndex) => charmIndex !== index);
+              setSelectedCharm((current) => Math.max(0, Math.min(current > index ? current - 1 : current, next.length - 1)));
+              patch({ charms: next });
+            }}
+          />
         </Field>
 
         <Field label="Font" htmlFor="keychain-font">
@@ -313,7 +341,7 @@ export function Studio() {
         </button>
         {more ? (
           <p className="mb-3 ml-[5.25rem] text-xs leading-5 text-zinc-500">
-            The icon button adds a printable charm. Emoji are the real OpenMoji line drawings, CC BY-SA 4.0. Drag an icon in the preview to place it. Reset restores the sample name.
+            The plus button adds emojis, and you can add more than one. Artwork is the OpenMoji line drawing, CC BY-SA 4.0. Drag each emoji in the preview. Reset restores the sample name.
           </p>
         ) : null}
 
@@ -367,7 +395,7 @@ export function Studio() {
           })}
         </div>
 
-        {settings.charm ? (
+        {settings.charms.length ? (
           <Field label="Icon" htmlFor="icon-size">
             <div className="flex items-center gap-2">
               <input
@@ -377,16 +405,46 @@ export function Studio() {
                 min={toDisplay(LIMITS.charmSize[0], unit)}
                 max={toDisplay(LIMITS.charmSize[1], unit)}
                 step={unit === "mm" ? 0.5 : 0.02}
-                value={displayNumber(settings.charmSize, unit)}
+                value={displayNumber(settings.charms[Math.min(selectedCharm, settings.charms.length - 1)]?.size ?? 26, unit)}
                 onChange={(event) =>
-                  commitNumber(event.target.value, unit, LIMITS.charmSize, (charmSize) => patch({ charmSize }))
+                  commitNumber(event.target.value, unit, LIMITS.charmSize, (size) =>
+                    patch({
+                      charms: settings.charms.map((charm, index) =>
+                        index === Math.min(selectedCharm, settings.charms.length - 1) ? { ...charm, size } : charm,
+                      ),
+                    }),
+                  )
                 }
                 className="h-10 w-24 rounded-lg border border-[#e6e7ec] bg-[#fafafa] px-3 text-sm tabular-nums"
               />
               <span className="text-sm text-zinc-500">{unit}</span>
             </div>
             <p className="mt-1 text-xs text-zinc-400">
-              Height of the icon or emoji. Drag it in the preview to move it.
+              Size of the selected emoji. Drag each one in the preview to move it.
+            </p>
+          </Field>
+        ) : null}
+
+        {settings.charms.length ? (
+          <Field label="Emoji base" htmlFor="emoji-base">
+            <div className="flex items-center gap-2">
+              <input
+                id="emoji-base"
+                type="number"
+                inputMode="decimal"
+                min={toDisplay(LIMITS.charmBase[0], unit)}
+                max={toDisplay(LIMITS.charmBase[1], unit)}
+                step={unit === "mm" ? 0.1 : 0.01}
+                value={displayNumber(settings.charmBase, unit)}
+                onChange={(event) =>
+                  commitNumber(event.target.value, unit, LIMITS.charmBase, (charmBase) => patch({ charmBase }))
+                }
+                className="h-10 w-24 rounded-lg border border-[#e6e7ec] bg-[#fafafa] px-3 text-sm tabular-nums"
+              />
+              <span className="text-sm text-zinc-500">{unit}</span>
+            </div>
+            <p className="mt-1 text-xs text-zinc-400">
+              How far the base follows the emoji past the lines. The lines stay the text color.
             </p>
           </Field>
         ) : null}

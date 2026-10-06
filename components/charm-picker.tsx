@@ -1,14 +1,13 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { charmGroups, charmRings, findCharm, isEmojiCharm, listCharms, type CharmGroup } from "@/lib/charms";
+import { charmGroups, findCharm, listCharms, type CharmGroup } from "@/lib/charms";
 
-export function CharmPicker({ value, onChange }: { value: string; onChange: (id: string) => void }) {
+export function CharmPicker({ onAdd, onClear }: { onAdd: (id: string) => void; onClear: () => void }) {
   const [open, setOpen] = useState(false);
   const [group, setGroup] = useState<CharmGroup | "All">("All");
   const [query, setQuery] = useState("");
   const root = useRef<HTMLDivElement>(null);
-  const selected = findCharm(value);
   const charms = listCharms(group === "All" ? undefined : group, query);
 
   useEffect(() => {
@@ -25,15 +24,11 @@ export function CharmPicker({ value, onChange }: { value: string; onChange: (id:
       <button
         type="button"
         aria-expanded={open}
-        aria-label={selected ? `Icon ${selected.label}` : "Add icon"}
+        aria-label="Add emoji"
         onClick={() => setOpen((current) => !current)}
-        className={`grid h-10 w-10 place-items-center rounded-lg border ${
-          selected
-            ? "border-[#c7b9ff] bg-[#f3efff] text-zinc-900"
-            : "border-[#e6e7ec] bg-white text-zinc-500 hover:bg-zinc-50"
-        }`}
+        className="grid h-10 w-10 place-items-center rounded-lg border border-[#e6e7ec] bg-white text-zinc-500 hover:bg-zinc-50"
       >
-        {selected ? <CharmMark id={selected.id} className="h-6 w-6" /> : <PawIcon />}
+        <PlusIcon />
       </button>
       {open ? (
         <div className="absolute right-0 z-30 mt-2 w-[22rem] rounded-xl border border-[#e6e7ec] bg-white p-3 shadow-xl">
@@ -41,13 +36,13 @@ export function CharmPicker({ value, onChange }: { value: string; onChange: (id:
             <input
               value={query}
               onChange={(event) => setQuery(event.target.value)}
-              placeholder="Search icons"
+              placeholder="Search emojis"
               className="h-9 min-w-0 flex-1 rounded-lg border border-[#e6e7ec] px-2 text-sm outline-none focus:border-[#8ed4ad]"
             />
             <button
               type="button"
               onClick={() => {
-                onChange("");
+                onClear();
                 setOpen(false);
               }}
               className="h-9 rounded-lg border border-[#e6e7ec] px-2 text-xs text-zinc-600 hover:bg-zinc-50"
@@ -69,23 +64,17 @@ export function CharmPicker({ value, onChange }: { value: string; onChange: (id:
               </button>
             ))}
           </div>
-          <div className="grid max-h-64 grid-cols-6 gap-1 overflow-y-auto">
+          <div className="grid max-h-72 grid-cols-8 gap-1 overflow-y-auto">
             {charms.map((charm) => (
               <button
                 key={charm.id}
                 type="button"
                 title={charm.label}
                 aria-label={charm.label}
-                aria-pressed={charm.id === value}
-                onClick={() => {
-                  onChange(charm.id);
-                  setOpen(false);
-                }}
-                className={`grid h-10 place-items-center rounded-lg text-zinc-900 hover:bg-zinc-100 ${
-                  charm.id === value ? "bg-[#f3efff]" : ""
-                }`}
+                onClick={() => onAdd(charm.id)}
+                className="grid h-10 place-items-center rounded-lg text-zinc-900 hover:bg-zinc-100"
               >
-                <CharmMark id={charm.id} className="h-7 w-7" />
+                <EmojiArt id={charm.id} />
               </button>
             ))}
           </div>
@@ -96,29 +85,62 @@ export function CharmPicker({ value, onChange }: { value: string; onChange: (id:
   );
 }
 
-function CharmMark({ id, className }: { id: string; className?: string }) {
-  const parts = charmRings(id, 0, 0, 1, 48);
-  const path = parts
-    .map((part) => {
-      const commands = part.points.map((point) => `${point.x.toFixed(3)} ${(-point.y).toFixed(3)}`);
-      return `M ${commands.join(" L ")} Z`;
-    })
-    .join(" ");
+export function CharmStrip({
+  charms,
+  selected,
+  onSelect,
+  onRemove,
+}: {
+  charms: { id: string }[];
+  selected: number;
+  onSelect: (index: number) => void;
+  onRemove: (index: number) => void;
+}) {
+  if (!charms.length) return null;
   return (
-    <svg viewBox="-0.58 -0.58 1.16 1.16" className={className} aria-hidden="true">
-      {isEmojiCharm(id) ? <circle cx="0" cy="0" r="0.44" fill="currentColor" opacity="0.28" /> : null}
-      <path d={path} fill="currentColor" fillRule="evenodd" />
-    </svg>
+    <ul className="mt-2 flex flex-wrap gap-1">
+      {charms.map((charm, index) => {
+        const found = findCharm(charm.id);
+        return (
+          <li key={`${charm.id}-${index}`}>
+            <span
+              className={`inline-flex items-center gap-0.5 rounded-lg border pl-1 ${
+                index === selected ? "border-[#c7b9ff] bg-[#f3efff]" : "border-[#e6e7ec] bg-white"
+              }`}
+            >
+              <button
+                type="button"
+                aria-label={found?.label ?? "Emoji"}
+                aria-pressed={index === selected}
+                onClick={() => onSelect(index)}
+                className="grid h-8 w-8 place-items-center"
+              >
+                {found ? <EmojiArt id={found.id} /> : null}
+              </button>
+              <button
+                type="button"
+                aria-label={`Remove ${found?.label ?? "emoji"}`}
+                onClick={() => onRemove(index)}
+                className="grid h-8 w-6 place-items-center text-sm text-zinc-400 hover:text-zinc-700"
+              >
+                ×
+              </button>
+            </span>
+          </li>
+        );
+      })}
+    </ul>
   );
 }
 
-function PawIcon() {
+function EmojiArt({ id }: { id: string }) {
+  return <img src={`/emoji/${id}.svg`} alt="" draggable={false} className="h-6 w-6 object-contain" />;
+}
+
+function PlusIcon() {
   return (
-    <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true" fill="currentColor">
-      <ellipse cx="8" cy="10.2" rx="2.5" ry="2.1" />
-      <circle cx="4.7" cy="7.2" r="1.25" />
-      <circle cx="8" cy="5.6" r="1.25" />
-      <circle cx="11.3" cy="7.2" r="1.25" />
+    <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="1.6">
+      <path d="M8 3.2v9.6M3.2 8h9.6" />
     </svg>
   );
 }

@@ -1,3 +1,4 @@
+import type { CharmPlacement } from "./geometry";
 import { SAMPLE_SPOTIFY_BARS } from "./spotify-code";
 
 export type Pattern = "vertical" | "square" | "smooth";
@@ -78,10 +79,8 @@ export type ProductSettings = {
   linkSize: number;
   letterGap: number;
   linkStyle: LinkStyle;
-  charm: string;
-  charmX: number;
-  charmY: number;
-  charmSize: number;
+  charms: CharmPlacement[];
+  charmBase: number;
   tagSize: number;
   tagShape: TagShape;
   pattern: Pattern;
@@ -134,10 +133,8 @@ const shared = {
   linkSize: 6,
   letterGap: 0,
   linkStyle: "tile" as LinkStyle,
-  charm: "",
-  charmX: 0,
-  charmY: 0,
-  charmSize: 26,
+  charms: [] as CharmPlacement[],
+  charmBase: 1.2,
   tagSize: 48,
   tagShape: "circle" as TagShape,
   pattern: "vertical" as Pattern,
@@ -431,7 +428,6 @@ export const PRODUCTS: Product[] = [
       textThickness: 1.8,
       baseThickness: 3,
       magnetDiameter: 8,
-      charmSize: 40,
     },
     fields: [
       { type: "text", label: "Name" },

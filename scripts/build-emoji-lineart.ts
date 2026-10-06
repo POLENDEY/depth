@@ -1,36 +1,92 @@
-// Builds lib/emoji-lineart.json from OpenMoji black line art (https://openmoji.org), CC BY-SA 4.0.
-import { writeFileSync } from "node:fs";
+// Builds the OpenMoji catalog from black line art (https://openmoji.org), CC BY-SA 4.0.
+// Expects tmp/openmoji.json and the extracted black SVGs in tmp/openmoji-black/.
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import ClipperLib from "clipper-lib";
+import { unzipSync } from "fflate";
 
-const EMOJI: Record<string, string> = {
-  smile: "1F60A",
-  grin: "1F601",
-  joy: "1F602",
-  love: "1F60D",
-  wink: "1F609",
-  kiss: "1F618",
-  cool: "1F60E",
-  tongue: "1F61B",
-  sad: "1F622",
-  cry: "1F62D",
-  angry: "1F620",
-  wow: "1F62E",
-  halo: "1F607",
-  party: "1F973",
-  sleep: "1F634",
-  neutral: "1F610",
-  stars: "1F929",
-  plead: "1F97A",
-  ghost: "1F47B",
-  skull: "1F480",
-  robot: "1F916",
-  alien: "1F47D",
-  fire: "1F525",
-  thumb: "1F44D",
+const GROUP_NAME: Record<string, string> = {
+  "smileys-emotion": "Smileys",
+  "people-body": "People",
+  "animals-nature": "Animals",
+  "food-drink": "Food",
+  "travel-places": "Places",
+  activities: "Activities",
+  objects: "Objects",
+  symbols: "Symbols",
+  flags: "Flags",
+};
+
+const LEGACY: Record<string, string> = {
+  heart: "❤️",
+  star: "⭐",
+  paw: "🐾",
+  flower: "🌸",
+  wings: "🪽",
+  music: "🎵",
+  snow: "❄️",
+  cloud: "☁️",
+  crown: "👑",
+  moon: "🌙",
+  sun: "☀️",
+  bolt: "⚡",
+  spark: "✨",
+  bow: "🎀",
+  diamond: "💎",
+  butterfly: "🦋",
+  smile: "😊",
+  grin: "😁",
+  joy: "😂",
+  love: "😍",
+  wink: "😉",
+  kiss: "😘",
+  cool: "😎",
+  tongue: "😛",
+  sad: "😢",
+  cry: "😭",
+  angry: "😠",
+  wow: "😮",
+  halo: "😇",
+  party: "🥳",
+  sleep: "😴",
+  neutral: "😐",
+  stars: "🤩",
+  plead: "🥺",
+  ghost: "👻",
+  skull: "💀",
+  robot: "🤖",
+  alien: "👽",
+  fire: "🔥",
+  thumb: "👍",
+  cat: "🐱",
+  dog: "🐶",
+  rabbit: "🐰",
+  bear: "🐻",
+  fox: "🦊",
+  frog: "🐸",
+  pig: "🐷",
+  chick: "🐤",
+  fish: "🐟",
+  penguin: "🐧",
+  apple: "🍎",
+  cake: "🎂",
+  cookie: "🍪",
+  icecream: "🍦",
+  coffee: "☕",
+  strawberry: "🍓",
+  pizza: "🍕",
+  candy: "🍬",
+  balloon: "🎈",
+  gift: "🎁",
+  house: "🏠",
+  car: "🚗",
+  plane: "✈️",
+  ball: "⚽",
+  rainbow: "🌈",
+  peace: "☮️",
 };
 
 type Vec = { x: number; y: number };
-type Stroke = { points: Vec[]; closed: boolean; width: number; fill: boolean };
+type Stroke = { points: Vec[]; closed: boolean; width: number; fill: boolean; paint: string };
 
 const CLIP = 100;
 const UNIT = 1 / 50;
@@ -62,7 +118,7 @@ function cubic(p0: Vec, p1: Vec, p2: Vec, p3: Vec) {
     Math.hypot(p1.x - p0.x, p1.y - p0.y) +
     Math.hypot(p2.x - p1.x, p2.y - p1.y) +
     Math.hypot(p3.x - p2.x, p3.y - p2.y);
-  const steps = Math.max(8, Math.ceil(length / 0.35));
+  const steps = Math.min(80, Math.max(8, Math.ceil(length / 0.35)));
   const points: Vec[] = [];
   for (let step = 1; step <= steps; step += 1) {
     const t = step / steps;
@@ -251,6 +307,8 @@ function parsePath(d: string) {
       prevQuad = null;
     } else if (!hasNumber()) {
       throw new Error(`Unsupported path command ${command}`);
+    } else {
+      index += 1;
     }
   }
   if (current.length) finish(false);
@@ -268,12 +326,13 @@ function strokesFromSvg(svg: string): Stroke[] {
     const width = Number(attr(tag, "stroke-width") ?? "2") || 2;
     const stroked = Boolean(stroke && stroke !== "none");
     const filled = fill !== "none" && !stroked;
+    const paint = (stroked ? stroke : fill) || "#000000";
     if (kind === "circle" || kind === "ellipse") {
       const rx = Number(kind === "circle" ? attr(tag, "r") : attr(tag, "rx"));
       const ry = Number(kind === "circle" ? attr(tag, "r") : attr(tag, "ry"));
       const points = ellipsePoints(Number(attr(tag, "cx") ?? 0), Number(attr(tag, "cy") ?? 0), rx, ry);
-      if (stroked) strokes.push({ points, closed: true, width, fill: false });
-      else if (filled || fill === null) strokes.push({ points, closed: true, width, fill: true });
+      if (stroked) strokes.push({ points, closed: true, width, fill: false, paint });
+      else if (filled || fill === null) strokes.push({ points, closed: true, width, fill: true, paint });
     } else if (kind === "line") {
       strokes.push({
         points: [
@@ -283,6 +342,7 @@ function strokesFromSvg(svg: string): Stroke[] {
         closed: false,
         width,
         fill: false,
+        paint,
       });
     } else if (kind === "polygon" || kind === "polyline" || kind === "rect") {
       let points: Vec[] = [];
@@ -302,8 +362,8 @@ function strokesFromSvg(svg: string): Stroke[] {
         for (let index = 0; index + 1 < values.length; index += 2) points.push({ x: values[index], y: values[index + 1] });
       }
       const closed = kind !== "polyline";
-      if (stroked) strokes.push({ points, closed, width, fill: false });
-      else strokes.push({ points, closed: true, width, fill: true });
+      if (stroked) strokes.push({ points, closed, width, fill: false, paint });
+      else strokes.push({ points, closed: true, width, fill: true, paint });
     } else if (kind === "path") {
       const data = attr(tag, "d");
       if (!data) continue;
@@ -312,8 +372,8 @@ function strokesFromSvg(svg: string): Stroke[] {
         const end = sub.points[sub.points.length - 1];
         const closed =
           sub.closed || Boolean(begin && end && Math.hypot(end.x - begin.x, end.y - begin.y) < 0.35);
-        if (stroked) strokes.push({ points: sub.points, closed, width, fill: false });
-        else if (closed) strokes.push({ points: sub.points, closed: true, width, fill: true });
+        if (stroked) strokes.push({ points: sub.points, closed, width, fill: false, paint });
+        else if (sub.points.length >= 3) strokes.push({ points: sub.points, closed: true, width, fill: true, paint });
       }
     }
   }
@@ -346,6 +406,45 @@ function strokePaths(stroke: Stroke) {
   return solution;
 }
 
+function offsetClosed(paths: { X: number; Y: number }[][], delta: number) {
+  const offset = new ClipperLib.ClipperOffset(2, 0.2 * CLIP);
+  offset.AddPaths(paths, ClipperLib.JoinType.jtRound, ClipperLib.EndType.etClosedPolygon);
+  const solution = new ClipperLib.Paths();
+  offset.Execute(solution, delta);
+  return solution as { X: number; Y: number }[][];
+}
+
+function pathsSpanX(paths: { X: number; Y: number }[][]) {
+  let minX = Infinity;
+  let maxX = -Infinity;
+  for (const path of paths) {
+    for (const point of path) {
+      minX = Math.min(minX, point.X);
+      maxX = Math.max(maxX, point.X);
+    }
+  }
+  return maxX - minX;
+}
+
+// Seal narrow bites left where overlapping color shapes were unioned, without filling real openings.
+function closePaths(paths: { X: number; Y: number }[][]) {
+  if (!paths.length) return paths;
+  const grow = 3.5 * CLIP;
+  const shrink = 2.6 * CLIP;
+  let grown = offsetClosed(paths, grow);
+  if (!grown.length || pathsSpanX(grown) + CLIP < pathsSpanX(paths)) {
+    grown = offsetClosed(paths.map((path) => [...path].reverse()), grow);
+  }
+  if (!grown.length) return paths;
+  let shrunk = offsetClosed(grown, -shrink);
+  if (!shrunk.length || pathsSpanX(shrunk) + 2 * CLIP < pathsSpanX(paths)) {
+    shrunk = offsetClosed(grown.map((path) => [...path].reverse()), -shrink);
+  }
+  if (!shrunk.length) return paths;
+  const fused = unionAll([...paths, ...shrunk]);
+  return fused.length ? fused : paths;
+}
+
 function unionAll(paths: { X: number; Y: number }[][]) {
   const clipper = new ClipperLib.Clipper(0);
   clipper.AddPaths(paths, ClipperLib.PolyType.ptSubject, true);
@@ -365,23 +464,189 @@ function toUnit(paths: { X: number; Y: number }[][]) {
     );
 }
 
-async function main() {
-  const library: Record<string, number[][][]> = {};
-  for (const [id, code] of Object.entries(EMOJI)) {
-    const response = await fetch(`https://raw.githubusercontent.com/hfg-gmuend/openmoji/master/black/svg/${code}.svg`);
-    if (!response.ok) throw new Error(`${id} ${code} returned ${response.status}`);
-    const svg = await response.text();
-    const pieces = strokesFromSvg(svg).flatMap(strokePaths);
-    if (!pieces.length) throw new Error(`${id} produced no lines`);
-    const rings = toUnit(unionAll(pieces));
-    library[id] = rings;
-    const points = rings.reduce((sum, ring) => sum + ring.length, 0);
-    console.log(`${id} ${code} rings=${rings.length} points=${points}`);
+type SourceEmoji = {
+  emoji: string;
+  hexcode: string;
+  group: string;
+  annotation: string;
+  tags: string;
+  openmoji_tags: string;
+  skintone: string;
+};
+
+function bare(value: string) {
+  return [...value].filter((char) => char !== "\uFE0F").join("");
+}
+
+function labelOf(annotation: string) {
+  return annotation ? annotation.charAt(0).toUpperCase() + annotation.slice(1) : annotation;
+}
+
+function groupMarkup(svg: string, ids: string[]) {
+  let result = "";
+  for (const id of ids) {
+    const open = new RegExp(`<g\\b[^>]*\\bid=["']${id}["'][^>]*>`, "i").exec(svg);
+    if (!open) continue;
+    let index = open.index + open[0].length;
+    let depth = 1;
+    const start = index;
+    while (index < svg.length && depth > 0) {
+      const nextOpen = svg.indexOf("<g", index);
+      const nextClose = svg.indexOf("</g>", index);
+      if (nextClose < 0) break;
+      if (nextOpen >= 0 && nextOpen < nextClose) {
+        depth += 1;
+        index = nextOpen + 2;
+      } else {
+        depth -= 1;
+        if (depth === 0) result += svg.slice(start, nextClose);
+        index = nextClose + 4;
+      }
+    }
   }
-  writeFileSync(
-    "lib/emoji-lineart.json",
-    `${JSON.stringify(library)}\n`,
-  );
+  return result;
+}
+
+function channel(color: string) {
+  const value = color.trim().toLowerCase();
+  if (value === "white") return [255, 255, 255];
+  if (value === "black" || value === "none") return [0, 0, 0];
+  const hex = value.replace("#", "");
+  const full = hex.length === 3 ? hex.split("").map((part) => part + part).join("") : hex;
+  if (full.length < 6) return [0, 0, 0];
+  return [parseInt(full.slice(0, 2), 16), parseInt(full.slice(2, 4), 16), parseInt(full.slice(4, 6), 16)];
+}
+
+function isLightPaint(color: string) {
+  const [red, green, blue] = channel(color);
+  const max = Math.max(red, green, blue);
+  const min = Math.min(red, green, blue);
+  const light = (max + min) / 2 / 255;
+  const sat = max === min ? 0 : (max - min) / (255 - Math.abs(max + min - 255));
+  return light > 0.9 && sat < 0.18;
+}
+
+function pathSpan(path: { X: number; Y: number }[]) {
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const point of path) {
+    minX = Math.min(minX, point.X);
+    minY = Math.min(minY, point.Y);
+    maxX = Math.max(maxX, point.X);
+    maxY = Math.max(maxY, point.Y);
+  }
+  return { minX, minY, maxX, maxY, span: Math.max(maxX - minX, maxY - minY) };
+}
+
+function pathCenter(path: { X: number; Y: number }[]) {
+  let x = 0;
+  let y = 0;
+  for (const point of path) {
+    x += point.X;
+    y += point.Y;
+  }
+  return { X: x / path.length, Y: y / path.length };
+}
+
+function shoelace(path: { X: number; Y: number }[]) {
+  let area = 0;
+  for (let index = 0; index < path.length; index += 1) {
+    const next = path[(index + 1) % path.length];
+    area += path[index].X * next.Y - next.X * path[index].Y;
+  }
+  return area / 2;
+}
+
+function unionTree(paths: { X: number; Y: number }[][]) {
+  const clipper = new ClipperLib.Clipper(0);
+  clipper.AddPaths(paths, ClipperLib.PolyType.ptSubject, true);
+  const tree = new ClipperLib.PolyTree();
+  clipper.Execute(ClipperLib.ClipType.ctUnion, tree, ClipperLib.PolyFillType.pftNonZero, ClipperLib.PolyFillType.pftNonZero);
+  return tree;
+}
+
+function layeredArt(svg: string) {
+  const colorMarkup = groupMarkup(svg, ["color", "hair", "skin", "skin-shadow"]);
+  const lineMarkup = groupMarkup(svg, ["line"]);
+  const colorStrokes = strokesFromSvg(colorMarkup || svg);
+  const lineStrokes = lineMarkup ? strokesFromSvg(lineMarkup) : [];
+  const body: { X: number; Y: number }[][] = [];
+  const light: { X: number; Y: number }[][] = [];
+  const ink: { X: number; Y: number }[][] = [];
+  const rounds: { X: number; Y: number }[][] = [];
+  for (const stroke of colorStrokes) {
+    if (!stroke.fill) continue;
+    const paths = strokePaths(stroke);
+    if (isLightPaint(stroke.paint)) light.push(...paths);
+    else body.push(...paths);
+  }
+  for (const stroke of lineStrokes) {
+    const paths = strokePaths(stroke);
+    if (!stroke.fill) {
+      ink.push(...paths);
+      continue;
+    }
+    for (const path of paths) {
+      const span = pathSpan(path).span;
+      const disk = Math.PI * (span / 2) ** 2;
+      if (span > 0 && span < 9 * CLIP && Math.abs(shoelace(path)) > disk * 0.55) rounds.push(path);
+      else ink.push(path);
+    }
+  }
+  const lightPaths = light.length ? ClipperLib.Clipper.PolyTreeToPaths(unionTree(light)) : [];
+  const lightPolygons = light.length
+    ? (ClipperLib.JS.PolyTreeToExPolygons(unionTree(light)) as { outer: { X: number; Y: number }[]; holes: { X: number; Y: number }[][] }[])
+    : [];
+  const pupils = rounds.filter((path) => {
+    const center = pathCenter(path);
+    const span = pathSpan(path).span;
+    return lightPolygons.some((polygon) => {
+      if (ClipperLib.Clipper.PointInPolygon(center, polygon.outer) === 0) return false;
+      if (polygon.holes.some((hole) => ClipperLib.Clipper.PointInPolygon(center, hole) !== 0)) return false;
+      return pathSpan(polygon.outer).span > span * 1.35;
+    });
+  });
+  const pupilSet = new Set(pupils);
+  for (const path of rounds) if (!pupilSet.has(path)) ink.push(path);
+  const markPaths = [...lightPaths, ...ink];
+  return {
+    body: body.length ? toUnit(closePaths(unionAll(body))) : [],
+    mark: markPaths.length ? toUnit(unionAll(markPaths)) : [],
+    pupil: pupils.length ? toUnit(unionAll(pupils)) : [],
+  };
+}
+
+async function main() {
+  const catalog = JSON.parse(readFileSync("lib/emoji-catalog.json", "utf8")) as { id: string }[];
+  const zip = unzipSync(readFileSync("tmp/openmoji-svg-color.zip"));
+  mkdirSync("public/emoji", { recursive: true });
+  let built = 0;
+  let skipped = 0;
+  for (const entry of catalog) {
+    const file = zip[`${entry.id}.svg`];
+    if (!file) {
+      skipped += 1;
+      continue;
+    }
+    try {
+      const svg = new TextDecoder().decode(file);
+      const art = layeredArt(svg);
+      if (!art.body.length && !art.mark.length) {
+        skipped += 1;
+        continue;
+      }
+      writeFileSync(`public/emoji/${entry.id}.json`, JSON.stringify(art));
+      writeFileSync(`public/emoji/${entry.id}.svg`, svg);
+      built += 1;
+    } catch (error) {
+      skipped += 1;
+      console.warn(`skip ${entry.id}: ${error instanceof Error ? error.message : error}`);
+    }
+    if (built > 0 && built % 100 === 0) writeFileSync("tmp/emoji-progress.txt", `${built} ${entry.id}\n`);
+  }
+  console.log(`layered ${built} skipped ${skipped}`);
 }
 
 main().catch((error) => {

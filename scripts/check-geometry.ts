@@ -35,10 +35,8 @@ const defaults = {
   holeSide: "left" as const,
   baseThickness: 2.4,
   textThickness: 1.6,
-  charm: "",
-  charmX: 0,
-  charmY: 0,
-  charmSize: 26,
+  charms: [] as { id: string; x: number; y: number; size: number }[],
+  charmBase: 1.2,
   holeOffsetX: 0,
   holeOffsetY: 0,
 };

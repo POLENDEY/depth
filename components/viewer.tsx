@@ -3,7 +3,7 @@
 import { useEffect, useRef } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
-import type { KeychainModel } from "@/lib/geometry";
+import { LIMITS, type CharmBox, type CharmPlacement, type KeychainModel } from "@/lib/geometry";
 
 type ViewerApi = {
   textMesh: THREE.Mesh;
@@ -17,19 +17,17 @@ type ViewerProps = {
   model: KeychainModel | null;
   textColor: string;
   baseColor: string;
-  charmX?: number;
-  charmY?: number;
-  onCharmMove?: (x: number, y: number) => void;
+  charms?: CharmPlacement[];
+  onCharmMove?: (index: number, x: number, y: number) => void;
   holeX?: number;
   holeY?: number;
   onHoleMove?: (x: number, y: number) => void;
 };
 
 type DragInfo = {
-  charmBounds: KeychainModel["charmBounds"];
-  charmX: number;
-  charmY: number;
-  onCharmMove?: (x: number, y: number) => void;
+  charmBounds: CharmBox[];
+  charms: CharmPlacement[];
+  onCharmMove?: (index: number, x: number, y: number) => void;
   hole: KeychainModel["hole"];
   holeX: number;
   holeY: number;
@@ -40,8 +38,7 @@ export function Viewer({
   model,
   textColor,
   baseColor,
-  charmX = 0,
-  charmY = 0,
+  charms = [],
   onCharmMove,
   holeX = 0,
   holeY = 0,
@@ -50,17 +47,15 @@ export function Viewer({
   const hostRef = useRef<HTMLDivElement>(null);
   const apiRef = useRef<ViewerApi | null>(null);
   const dragRef = useRef<DragInfo>({
-    charmBounds: null,
-    charmX: 0,
-    charmY: 0,
+    charmBounds: [],
+    charms: [],
     hole: null,
     holeX: 0,
     holeY: 0,
   });
   dragRef.current = {
-    charmBounds: model?.charmBounds ?? null,
-    charmX,
-    charmY,
+    charmBounds: model?.charmBounds ?? [],
+    charms,
     onCharmMove,
     hole: model?.hole ?? null,
     holeX,
@@ -229,6 +224,7 @@ export function Viewer({
     const drag = {
       active: false,
       target: "charm" as "charm" | "hole",
+      charmIndex: -1,
       pointerId: -1,
       startLocal: new THREE.Vector3(),
       startX: 0,
@@ -257,25 +253,32 @@ export function Viewer({
         const reach = info.hole.radius + 1.8;
         if ((local.x - info.hole.x) ** 2 + (local.y - info.hole.y) ** 2 <= reach ** 2) target = "hole";
       }
-      const box = info.charmBounds;
-      if (!target && box && info.onCharmMove) {
+      let charmIndex = -1;
+      if (!target && info.onCharmMove) {
         const pad = 1.6;
-        if (
-          local.x >= box.minX - pad &&
-          local.x <= box.maxX + pad &&
-          local.y >= box.minY - pad &&
-          local.y <= box.maxY + pad
-        ) {
-          target = "charm";
+        for (let index = info.charmBounds.length - 1; index >= 0; index -= 1) {
+          const box = info.charmBounds[index];
+          if (
+            local.x >= box.minX - pad &&
+            local.x <= box.maxX + pad &&
+            local.y >= box.minY - pad &&
+            local.y <= box.maxY + pad
+          ) {
+            charmIndex = index;
+            target = "charm";
+            break;
+          }
         }
       }
       if (!target) return;
       drag.active = true;
       drag.target = target;
+      drag.charmIndex = charmIndex;
       drag.pointerId = event.pointerId;
       drag.startLocal.copy(local);
-      drag.startX = target === "hole" ? info.holeX : info.charmX;
-      drag.startY = target === "hole" ? info.holeY : info.charmY;
+      const charm = info.charms[charmIndex];
+      drag.startX = target === "hole" ? info.holeX : (charm?.x ?? 0);
+      drag.startY = target === "hole" ? info.holeY : (charm?.y ?? 0);
       const normal = new THREE.Vector3(0, 0, 1).transformDirection(modelRoot.matrixWorld);
       drag.plane.setFromNormalAndCoplanarPoint(normal, hit.point);
       userMoved = true;
@@ -302,8 +305,9 @@ export function Viewer({
         return;
       }
       info.onCharmMove?.(
-        Math.min(90, Math.max(-90, drag.startX + dx)),
-        Math.min(50, Math.max(-50, drag.startY + dy)),
+        drag.charmIndex,
+        Math.min(LIMITS.charmOffsetX[1], Math.max(LIMITS.charmOffsetX[0], drag.startX + dx)),
+        Math.min(LIMITS.charmOffsetY[1], Math.max(LIMITS.charmOffsetY[0], drag.startY + dy)),
       );
     };
 

@@ -1,13 +1,14 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { CharmPicker } from "@/components/charm-picker";
+import { CharmPicker, CharmStrip } from "@/components/charm-picker";
+import { ensureCharmArt } from "@/lib/charms";
 import { FontField } from "@/components/font-field";
 import { Viewer } from "@/components/viewer";
 import { productBySlug, TAG_GROUPS, type ProductSettings, type TagShape } from "@/lib/catalog";
 import { downloadBlob, EXPORT_FORMATS, exportKeychain, slugify, type ExportFormat } from "@/lib/export";
 import { useFontLibrary } from "@/lib/font-library";
-import { LIMITS, type KeychainModel } from "@/lib/geometry";
+import { LIMITS, MAX_CHARMS, withCharm, type KeychainModel } from "@/lib/geometry";
 import { buildProduct } from "@/lib/models";
 import { encodeSpotifyBars, fetchSpotifyBars } from "@/lib/spotify-code";
 import { formatSize, fromDisplay, toDisplay, type Unit } from "@/lib/units";
@@ -22,6 +23,7 @@ export function MakerStudio({ slug }: { slug: string }) {
   const [building, setBuilding] = useState(true);
   const [exporting, setExporting] = useState(false);
   const [generating, setGenerating] = useState(false);
+  const [selectedCharm, setSelectedCharm] = useState(0);
   const [spotifyNotice, setSpotifyNotice] = useState<{ tone: "ready" | "error"; text: string } | null>(null);
   const fonts = useFontLibrary();
   const settingsRef = useRef(settings);
@@ -57,6 +59,7 @@ export function MakerStudio({ slug }: { slug: string }) {
       void (async () => {
         try {
           const font = needsFont ? await fonts.load(current.fontId) : null;
+          await Promise.all(current.charms.map((charm) => ensureCharmArt(charm.id)));
           if (cancel) return;
           const next = buildProduct(product.slug, font, current, "preview");
           if (cancel) {
@@ -112,6 +115,7 @@ export function MakerStudio({ slug }: { slug: string }) {
     setExporting(true);
     try {
       const font = needsFont ? await fonts.load(current.fontId) : null;
+      await Promise.all(current.charms.map((charm) => ensureCharmArt(charm.id)));
       const printModel = buildProduct(active.slug, font, current, "print");
       try {
         const file = await exportKeychain(
@@ -164,9 +168,24 @@ export function MakerStudio({ slug }: { slug: string }) {
             model={visible}
             textColor={settings.textColor}
             baseColor={settings.baseColor}
-            charmX={settings.charmX}
-            charmY={settings.charmY}
-            onCharmMove={slug === "magnet" && settings.charm ? (x, y) => patch({ charmX: x, charmY: y }) : undefined}
+            charms={settings.charms}
+            onCharmMove={
+              slug === "magnet" && settings.charms.length
+                ? (index, x, y) => {
+                    setSelectedCharm(index);
+                    setSettings((previous) =>
+                      previous
+                        ? {
+                            ...previous,
+                            charms: previous.charms.map((charm, charmIndex) =>
+                              charmIndex === index ? { ...charm, x, y } : charm,
+                            ),
+                          }
+                        : previous,
+                    );
+                  }
+                : undefined
+            }
           />
           <div className="pointer-events-none absolute inset-x-0 bottom-0 flex flex-col gap-2 p-3 sm:flex-row sm:items-end sm:justify-between">
             <div className="rounded-xl bg-white/85 px-3 py-2 text-sm text-zinc-600 shadow-sm backdrop-blur">
@@ -175,8 +194,8 @@ export function MakerStudio({ slug }: { slug: string }) {
               </p>
               {sizeOther ? <p className="text-xs tabular-nums text-zinc-500">{sizeOther}</p> : null}
               <p className="text-xs text-zinc-400">
-                {slug === "magnet" && settings.charm
-                  ? "Drag the icon to move it · Drag empty space to orbit"
+                {slug === "magnet" && settings.charms.length
+                  ? "Drag an emoji to move it · Drag empty space to orbit"
                   : "Drag to orbit · Shift+drag to pan · Scroll to zoom"}
               </p>
             </div>
@@ -369,27 +388,68 @@ export function MakerStudio({ slug }: { slug: string }) {
                 <div className="flex items-center justify-between gap-3">
                   <p className="text-sm text-zinc-600">Icon</p>
                   <CharmPicker
-                    value={settings.charm}
-                    onChange={(charm) => patch({ charm, charmX: 0, charmY: 0 })}
+                    onAdd={(id) => {
+                      const next = withCharm(settings.charms, id, 40);
+                      if (next.length === settings.charms.length) {
+                        setError(`You can add up to ${MAX_CHARMS} emojis.`);
+                        return;
+                      }
+                      setSelectedCharm(next.length - 1);
+                      patch({ charms: next });
+                    }}
+                    onClear={() => {
+                      setSelectedCharm(0);
+                      patch({ charms: [] });
+                    }}
                   />
                 </div>
-                {settings.charm ? (
+                <CharmStrip
+                  charms={settings.charms}
+                  selected={selectedCharm}
+                  onSelect={setSelectedCharm}
+                  onRemove={(index) => {
+                    const next = settings.charms.filter((_, charmIndex) => charmIndex !== index);
+                    setSelectedCharm((currentIndex) =>
+                      Math.max(0, Math.min(currentIndex > index ? currentIndex - 1 : currentIndex, next.length - 1)),
+                    );
+                    patch({ charms: next });
+                  }}
+                />
+                {settings.charms.length ? (
                   <div className="mt-2">
                     <NumberRow
                       id={`${slug}-charm-size`}
                       label="Icon size"
                       unit={unit}
-                      value={settings.charmSize}
+                      value={settings.charms[Math.min(selectedCharm, settings.charms.length - 1)]?.size ?? 40}
                       min={LIMITS.charmSize[0]}
                       max={LIMITS.charmSize[1]}
                       step={0.5}
                       onUnit={setUnit}
-                      onChange={(charmSize) => patch({ charmSize })}
+                      onChange={(size) =>
+                        patch({
+                          charms: settings.charms.map((charm, index) =>
+                            index === Math.min(selectedCharm, settings.charms.length - 1) ? { ...charm, size } : charm,
+                          ),
+                        })
+                      }
                     />
-                    <p className="text-xs text-zinc-400">Drag the icon in the preview. Emoji faces are filled line art.</p>
+                    <p className="text-xs text-zinc-400">Size of the selected emoji. Drag each one in the preview.</p>
+                    <NumberRow
+                      id={`${slug}-charm-base`}
+                      label="Emoji base"
+                      unit={unit}
+                      value={settings.charmBase}
+                      min={LIMITS.charmBase[0]}
+                      max={LIMITS.charmBase[1]}
+                      step={0.1}
+                      onUnit={setUnit}
+                      onChange={(charmBase) => patch({ charmBase })}
+                    />
+                    <p className="text-xs text-zinc-400">How far the base follows the emoji past the lines.</p>
                   </div>
                 ) : (
-                  <p className="mt-1 text-xs text-zinc-400">Add an icon or emoji after the name.</p>
+                  <p className="mt-1 text-xs text-zinc-400">Add emojis after the name. You can add more than one.</p>
                 )}
               </div>
             );
