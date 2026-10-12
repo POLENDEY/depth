@@ -1,7 +1,8 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { Viewer } from "@/components/viewer";
+import { CostEstimate } from "@/components/cost-estimate";
 import { downloadBlob, EXPORT_FORMATS, exportKeychain, slugify, type ExportFormat } from "@/lib/export";
 import { FontField } from "@/components/font-field";
 import { useFontLibrary } from "@/lib/font-library";
@@ -9,6 +10,8 @@ import { CharmPicker, CharmStrip } from "@/components/charm-picker";
 import { ensureCharmArt } from "@/lib/charms";
 import { buildKeychain, LIMITS, MAX_CHARMS, withCharm, type HoleSide, type KeychainModel, type KeychainParams } from "@/lib/geometry";
 import { formatSize, fromDisplay, toDisplay, type Unit } from "@/lib/units";
+import { UndoRedoControls } from "@/components/undo-redo-controls";
+import { useUndoRedo } from "@/components/use-undo-redo";
 
 type Settings = KeychainParams & {
   fontId: string;
@@ -20,6 +23,7 @@ const INITIAL: Settings = {
   text: "PAUL",
   fontId: "luckiest-guy",
   letterHeight: 18,
+  lineSpacing: 4,
   outline: 2.4,
   holeEnabled: true,
   holeDiameter: 5,
@@ -41,7 +45,9 @@ const PRESETS = [
 ];
 
 export function Studio() {
-  const [settings, setSettings] = useState<Settings>(INITIAL);
+  const history = useUndoRedo(INITIAL);
+  const settings = history.state;
+  const setSettings = history.update;
   const [unit, setUnit] = useState<Unit>("mm");
   const [format, setFormat] = useState<ExportFormat>("3mf");
   const [model, setModel] = useState<KeychainModel | null>(null);
@@ -50,6 +56,7 @@ export function Studio() {
   const [exporting, setExporting] = useState(false);
   const [more, setMore] = useState(false);
   const [selectedCharm, setSelectedCharm] = useState(0);
+  const [showDimensions, setShowDimensions] = useState(false);
   const fonts = useFontLibrary();
 
   const geometryKey = useMemo(
@@ -58,6 +65,7 @@ export function Studio() {
         text: settings.text,
         fontId: settings.fontId,
         letterHeight: settings.letterHeight,
+        lineSpacing: settings.lineSpacing,
         outline: settings.outline,
         holeEnabled: settings.holeEnabled,
         holeDiameter: settings.holeDiameter,
@@ -209,6 +217,8 @@ export function Studio() {
                 ? (x, y) => patch({ holeOffsetX: x, holeOffsetY: y })
                 : undefined
             }
+            showDimensions={showDimensions}
+            onToggleDimensions={() => setShowDimensions((visible) => !visible)}
           />
           <div className="pointer-events-none absolute inset-x-0 bottom-0 flex flex-col gap-2 p-3 sm:flex-row sm:items-end sm:justify-between">
             <div className="pointer-events-none rounded-xl bg-white/85 px-3 py-2 text-sm text-zinc-600 shadow-sm backdrop-blur">
@@ -225,6 +235,7 @@ export function Studio() {
               </p>
             </div>
             <div className="pointer-events-auto flex items-center justify-end gap-2">
+              <CostEstimate model={visibleModel} modelName="Name keychain" />
               <label className="sr-only" htmlFor="export-format">
                 Download format
               </label>
@@ -272,17 +283,24 @@ export function Studio() {
       </section>
 
       <aside className="controls rounded-2xl border border-[#e6e7ec] bg-white p-4 shadow-[0_1px_2px_rgba(16,24,40,0.04)] lg:sticky lg:top-6">
+        <UndoRedoControls
+          onUndo={history.undo}
+          onRedo={history.redo}
+          canUndo={history.canUndo}
+          canRedo={history.canRedo}
+        />
         <Field label="Name" htmlFor="keychain-name">
-          <div className="flex items-center gap-1.5">
-            <input
+          <div className="flex items-start gap-1.5">
+            <textarea
               id="keychain-name"
               value={settings.text}
               maxLength={LIMITS.characters}
+              rows={2}
               autoComplete="off"
               spellCheck={false}
               onChange={(event) => patch({ text: event.target.value.slice(0, LIMITS.characters) })}
               style={{ fontFamily: `"${activeFamily}", system-ui, sans-serif` }}
-              className="h-10 min-w-0 flex-1 rounded-lg border border-[#d7f3e4] bg-[#e7f9ef] px-3 text-base text-zinc-900 outline-none focus:border-[#8ed4ad] focus:bg-[#dff6e8]"
+              className="min-h-16 min-w-0 flex-1 resize-none rounded-lg border border-[#d7f3e4] bg-[#e7f9ef] px-3 py-2 text-base leading-6 text-zinc-900 outline-none focus:border-[#8ed4ad] focus:bg-[#dff6e8]"
             />
             <CharmPicker
               onAdd={(id) => {
@@ -318,6 +336,28 @@ export function Studio() {
               patch({ charms: next });
             }}
           />
+          <p className="mt-1 text-xs text-zinc-400">Press Enter to add a line.</p>
+        </Field>
+        <Field label="Line gap" htmlFor="line-spacing">
+          <div className="flex items-center gap-2">
+            <input
+              id="line-spacing"
+              type="number"
+              inputMode="decimal"
+              min={toDisplay(LIMITS.lineSpacing[0], unit)}
+              max={toDisplay(LIMITS.lineSpacing[1], unit)}
+              step={unit === "mm" ? 0.5 : 0.02}
+              value={displayNumber(settings.lineSpacing, unit)}
+              onChange={(event) =>
+                commitNumber(event.target.value, unit, LIMITS.lineSpacing, (lineSpacing) =>
+                  patch({ lineSpacing }),
+                )
+              }
+              className="h-10 w-24 rounded-lg border border-[#e6e7ec] bg-[#fafafa] px-3 text-sm tabular-nums"
+            />
+            <span className="text-sm text-zinc-500">{unit}</span>
+          </div>
+          <p className="mt-1 text-xs text-zinc-400">Vertical gap between lines. Set 0 for tightly stacked lines.</p>
         </Field>
 
         <Field label="Font" htmlFor="keychain-font">

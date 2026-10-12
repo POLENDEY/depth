@@ -19,6 +19,7 @@ export type CharmBox = { minX: number; minY: number; maxX: number; maxY: number 
 export type KeychainParams = {
   text: string;
   letterHeight: number;
+  lineSpacing: number;
   outline: number;
   holeEnabled: boolean;
   holeDiameter: number;
@@ -58,6 +59,7 @@ export const LIMITS = {
   textThickness: [0.4, 4] as const,
   charmSize: [8, 64] as const,
   charmBase: [0, 4] as const,
+  lineSpacing: [0, 30] as const,
   charmOffsetX: [-160, 240] as const,
   charmOffsetY: [-80, 80] as const,
   holeOffsetX: [-120, 120] as const,
@@ -96,6 +98,7 @@ export function buildKeychain(
     ...params,
     text,
     letterHeight: clamp(params.letterHeight, LIMITS.letterHeight[0], LIMITS.letterHeight[1]),
+    lineSpacing: clamp(params.lineSpacing, LIMITS.lineSpacing[0], LIMITS.lineSpacing[1]),
     outline: clamp(params.outline, LIMITS.outline[0], LIMITS.outline[1]),
     holeDiameter: clamp(params.holeDiameter, LIMITS.holeDiameter[0], LIMITS.holeDiameter[1]),
     baseThickness: clamp(params.baseThickness, LIMITS.baseThickness[0], LIMITS.baseThickness[1]),
@@ -170,6 +173,7 @@ function getProfile(font: Font, params: KeychainParams, quality: MeshQuality) {
     font.names?.fontFamily?.en ?? font.unitsPerEm,
     params.text,
     params.letterHeight.toFixed(2),
+    params.lineSpacing.toFixed(2),
     params.outline.toFixed(2),
     params.holeEnabled,
     params.holeDiameter.toFixed(2),
@@ -191,7 +195,7 @@ function getProfile(font: Font, params: KeychainParams, quality: MeshQuality) {
     warnings.push(`This font has no glyph for ${missing.join(" ")}. Those characters were skipped.`);
   }
 
-  const rings = textToRings(font, params.text, params.letterHeight, settings.maxCurveSteps);
+  const rings = textToRings(font, params.text, params.letterHeight, params.lineSpacing, settings.maxCurveSteps);
   if (!rings.length) {
     throw new Error("That text has no printable outlines. Try letters or numbers.");
   }
@@ -209,11 +213,15 @@ function getProfile(font: Font, params: KeychainParams, quality: MeshQuality) {
   }
   const textPaths = charmPaths.length ? clean(unionPaths([...letterPaths, ...charmPaths])) : letterPaths;
 
-  let basePaths = offsetPaths(letterPaths, params.outline, settings.arcTolerance);
-  if (spanX(basePaths) + 0.2 < spanX(letterPaths)) {
-    basePaths = offsetPaths(reversePaths(letterPaths), params.outline, settings.arcTolerance);
+  let letterBasePaths = offsetPaths(letterPaths, params.outline, settings.arcTolerance);
+  if (spanX(letterBasePaths) + 0.2 < spanX(letterPaths)) {
+    letterBasePaths = offsetPaths(reversePaths(letterPaths), params.outline, settings.arcTolerance);
   }
-  const letterBox = pathBounds(basePaths);
+  const letterBox = pathBounds(letterBasePaths);
+  let basePaths = offsetPaths(textPaths, params.outline, settings.arcTolerance);
+  if (spanX(basePaths) + 0.2 < spanX(textPaths)) {
+    basePaths = offsetPaths(reversePaths(textPaths), params.outline, settings.arcTolerance);
+  }
   if (charmPiece.base.length) basePaths = [...basePaths, ...charmPiece.base];
   basePaths = clean(unionPaths(basePaths));
   if (!basePaths.length) {
@@ -291,22 +299,34 @@ function missingGlyphs(font: Font, text: string) {
   return missing;
 }
 
-function textToRings(font: Font, text: string, letterHeight: number, maxCurveSteps: number, stepMm = 1.4) {
+function textToRings(
+  font: Font,
+  text: string,
+  letterHeight: number,
+  lineSpacing: number,
+  maxCurveSteps: number,
+  stepMm = 1.4,
+) {
   const sample = font.charToGlyph("H");
   const capUnits = sample.yMax || font.ascender || font.unitsPerEm * 0.7;
   const fontSize = (letterHeight * font.unitsPerEm) / capUnits;
   const scale = fontSize / font.unitsPerEm;
   const commands: PathCommand[] = [];
-  const chars = Array.from(text);
-  let x = 0;
+  const lines = text.replace(/\r\n?/g, "\n").split("\n");
 
-  for (let index = 0; index < chars.length; index += 1) {
-    const glyph = font.charToGlyph(chars[index]);
-    if (index > 0) {
-      x += font.getKerningValue(font.charToGlyph(chars[index - 1]), glyph) * scale;
+  for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
+    const chars = Array.from(lines[lineIndex]);
+    const baseline = lineIndex * (letterHeight + lineSpacing);
+    let x = 0;
+
+    for (let index = 0; index < chars.length; index += 1) {
+      const glyph = font.charToGlyph(chars[index]);
+      if (index > 0) {
+        x += font.getKerningValue(font.charToGlyph(chars[index - 1]), glyph) * scale;
+      }
+      commands.push(...glyph.getPath(x, baseline, fontSize, {}, font).commands);
+      x += (glyph.advanceWidth ?? font.unitsPerEm * 0.5) * scale;
     }
-    commands.push(...glyph.getPath(x, 0, fontSize, {}, font).commands);
-    x += (glyph.advanceWidth ?? font.unitsPerEm * 0.5) * scale;
   }
 
   return commandsToRings(commands, maxCurveSteps, stepMm).filter((ring) => Math.abs(signedArea(ring)) > 0.12);
@@ -1335,7 +1355,7 @@ export function outlinedMagnet(
   const warnings = missing.length
     ? [`This font has no glyph for ${missing.join(" ")}. Those characters were skipped.`]
     : [];
-  const rings = textToRings(font, raw, letterHeight, 36, 0.4);
+  const rings = textToRings(font, raw, letterHeight, 0, 36, 0.4);
   if (!rings.length) throw new Error("That text has no printable outlines. Try letters or numbers.");
   const letters = ringBounds(rings);
   const centerX = (letters.minX + letters.maxX) / 2;

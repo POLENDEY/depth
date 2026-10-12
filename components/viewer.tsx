@@ -10,6 +10,8 @@ type ViewerApi = {
   baseMesh: THREE.Mesh;
   textMat: THREE.MeshStandardMaterial;
   baseMat: THREE.MeshStandardMaterial;
+  dimensionGroup: THREE.Group;
+  modelRoot: THREE.Group;
   frame: (reset: boolean) => void;
 };
 
@@ -22,6 +24,8 @@ type ViewerProps = {
   holeX?: number;
   holeY?: number;
   onHoleMove?: (x: number, y: number) => void;
+  showDimensions?: boolean;
+  onToggleDimensions?: () => void;
 };
 
 type DragInfo = {
@@ -43,6 +47,8 @@ export function Viewer({
   holeX = 0,
   holeY = 0,
   onHoleMove,
+  showDimensions = false,
+  onToggleDimensions,
 }: ViewerProps) {
   const hostRef = useRef<HTMLDivElement>(null);
   const apiRef = useRef<ViewerApi | null>(null);
@@ -53,15 +59,17 @@ export function Viewer({
     holeX: 0,
     holeY: 0,
   });
-  dragRef.current = {
-    charmBounds: model?.charmBounds ?? [],
-    charms,
-    onCharmMove,
-    hole: model?.hole ?? null,
-    holeX,
-    holeY,
-    onHoleMove,
-  };
+  useEffect(() => {
+    dragRef.current = {
+      charmBounds: model?.charmBounds ?? [],
+      charms,
+      onCharmMove,
+      hole: model?.hole ?? null,
+      holeX,
+      holeY,
+      onHoleMove,
+    };
+  }, [model, charms, onCharmMove, holeX, holeY, onHoleMove]);
   useEffect(() => {
     const host = hostRef.current;
     if (!host) return;
@@ -143,11 +151,12 @@ export function Viewer({
     });
     const textMesh = new THREE.Mesh(new THREE.BufferGeometry(), textMat);
     const baseMesh = new THREE.Mesh(new THREE.BufferGeometry(), baseMat);
+    const dimensionGroup = new THREE.Group();
     textMesh.castShadow = true;
     baseMesh.castShadow = true;
     textMesh.visible = false;
     baseMesh.visible = false;
-    modelRoot.add(baseMesh, textMesh);
+    modelRoot.add(baseMesh, textMesh, dimensionGroup);
 
     let userMoved = false;
     const framedCenter = new THREE.Vector3();
@@ -158,15 +167,15 @@ export function Viewer({
 
     const frame = (reset: boolean) => {
       if (reset) userMoved = false;
-      modelRoot.rotation.order = "XZY";
-      modelRoot.rotation.set(-Math.PI / 2, 0, 0.52);
+      modelRoot.rotation.order = "XYZ";
+      modelRoot.rotation.set(-Math.PI / 2, 0, 0);
       modelRoot.position.set(0, 0, 0);
       modelRoot.updateWorldMatrix(true, true);
-      const raw = new THREE.Box3().setFromObject(modelRoot);
+      const raw = new THREE.Box3().setFromObject(baseMesh).union(new THREE.Box3().setFromObject(textMesh));
       if (raw.isEmpty()) return;
       modelRoot.position.y -= raw.min.y;
       modelRoot.updateWorldMatrix(true, true);
-      const placed = new THREE.Box3().setFromObject(modelRoot);
+      const placed = new THREE.Box3().setFromObject(baseMesh).union(new THREE.Box3().setFromObject(textMesh));
       const center = placed.getCenter(new THREE.Vector3());
       const size = placed.getSize(new THREE.Vector3());
       const radius = Math.max(size.x, size.y, size.z) * 0.62 || 20;
@@ -217,7 +226,7 @@ export function Viewer({
     document.addEventListener("visibilitychange", onVisibility);
     renderer.setAnimationLoop(loop);
 
-    apiRef.current = { textMesh, baseMesh, textMat, baseMat, frame };
+    apiRef.current = { textMesh, baseMesh, textMat, baseMat, dimensionGroup, modelRoot, frame };
 
     const raycaster = new THREE.Raycaster();
     const pointer = new THREE.Vector2();
@@ -337,6 +346,7 @@ export function Viewer({
       controls.dispose();
       textMat.dispose();
       baseMat.dispose();
+      clearDimensions(dimensionGroup);
       floor.geometry.dispose();
       (floor.material as THREE.Material).dispose();
       renderer.dispose();
@@ -348,6 +358,7 @@ export function Viewer({
   useEffect(() => {
     const api = apiRef.current;
     if (!api) return;
+    clearDimensions(api.dimensionGroup);
     if (!model) {
       api.textMesh.visible = false;
       api.baseMesh.visible = false;
@@ -357,8 +368,9 @@ export function Viewer({
     api.baseMesh.geometry = model.base;
     api.textMesh.visible = true;
     api.baseMesh.visible = true;
+    if (showDimensions) addDimensions(api.dimensionGroup, model);
     api.frame(false);
-  }, [model]);
+  }, [model, showDimensions]);
 
   useEffect(() => {
     const api = apiRef.current;
@@ -382,6 +394,106 @@ export function Viewer({
       >
         Reset view
       </button>
+      <button
+        type="button"
+        aria-pressed={showDimensions}
+        onClick={onToggleDimensions}
+        className="absolute top-3 right-28 z-10 rounded-full border border-[#e6e7ec] bg-white/90 px-3 py-1.5 text-xs font-medium text-zinc-600 shadow-sm backdrop-blur hover:bg-white"
+      >
+        Dimensions {showDimensions ? "On" : "Off"}
+      </button>
     </>
   );
+}
+
+function clearDimensions(group: THREE.Group) {
+  for (const child of [...group.children]) {
+    group.remove(child);
+    child.traverse((object) => {
+      if (object instanceof THREE.Line) {
+        object.geometry.dispose();
+        (object.material as THREE.Material).dispose();
+      } else if (object instanceof THREE.Sprite) {
+        object.material.map?.dispose();
+        object.material.dispose();
+      }
+    });
+  }
+}
+
+function addDimensions(group: THREE.Group, model: KeychainModel) {
+  const bounds = new THREE.Box3().setFromBufferAttribute(
+    model.base.getAttribute("position") as THREE.BufferAttribute,
+  ).union(
+    new THREE.Box3().setFromBufferAttribute(model.text.getAttribute("position") as THREE.BufferAttribute),
+  );
+  const min = bounds.min;
+  const max = bounds.max;
+  const offset = Math.max(3, Math.max(model.width, model.height) * 0.08);
+  const z = max.z + 0.6;
+  const annotations = [
+    {
+      points: [
+        new THREE.Vector3(min.x, min.y - offset, z),
+        new THREE.Vector3(max.x, min.y - offset, z),
+      ],
+      label: `${model.width.toFixed(1)} mm`,
+      labelAt: new THREE.Vector3((min.x + max.x) / 2, min.y - offset, z),
+    },
+    {
+      points: [
+        new THREE.Vector3(max.x + offset, min.y, z),
+        new THREE.Vector3(max.x + offset, max.y, z),
+      ],
+      label: `${model.height.toFixed(1)} mm`,
+      labelAt: new THREE.Vector3(max.x + offset, (min.y + max.y) / 2, z),
+    },
+    {
+      points: [
+        new THREE.Vector3(min.x - offset * 0.65, max.y + offset * 0.4, min.z),
+        new THREE.Vector3(min.x - offset * 0.65, max.y + offset * 0.4, max.z),
+      ],
+      label: `${model.depth.toFixed(1)} mm`,
+      labelAt: new THREE.Vector3(min.x - offset * 0.65, max.y + offset * 0.4, (min.z + max.z) / 2),
+    },
+  ];
+
+  for (const annotation of annotations) {
+    const line = new THREE.Line(
+      new THREE.BufferGeometry().setFromPoints(annotation.points),
+      new THREE.LineBasicMaterial({ color: "#2563eb", depthTest: false }),
+    );
+    line.renderOrder = 10;
+    group.add(line, dimensionLabel(annotation.label, annotation.labelAt, model));
+  }
+}
+
+function dimensionLabel(label: string, position: THREE.Vector3, model: KeychainModel) {
+  const canvas = document.createElement("canvas");
+  canvas.width = 320;
+  canvas.height = 96;
+  const context = canvas.getContext("2d");
+  if (!context) throw new Error("Could not create dimension labels.");
+  context.fillStyle = "rgba(255,255,255,0.96)";
+  context.strokeStyle = "#bfdbfe";
+  context.lineWidth = 5;
+  context.beginPath();
+  context.roundRect(4, 4, 312, 88, 18);
+  context.fill();
+  context.stroke();
+  context.fillStyle = "#1e3a8a";
+  context.font = "bold 38px Arial, sans-serif";
+  context.textAlign = "center";
+  context.textBaseline = "middle";
+  context.fillText(label, 160, 48);
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  const sprite = new THREE.Sprite(
+    new THREE.SpriteMaterial({ map: texture, transparent: true, depthTest: false }),
+  );
+  const height = Math.max(3.4, Math.max(model.width, model.height) * 0.075);
+  sprite.scale.set(height * (canvas.width / canvas.height), height, 1);
+  sprite.position.copy(position);
+  sprite.renderOrder = 11;
+  return sprite;
 }

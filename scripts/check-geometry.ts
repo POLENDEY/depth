@@ -29,6 +29,7 @@ import { assertArticulatedHingeRound, assertBlockChain, buildProduct } from "../
 const defaults = {
   text: "PAUL",
   letterHeight: 18,
+  lineSpacing: 4,
   outline: 2.4,
   holeEnabled: true,
   holeDiameter: 5,

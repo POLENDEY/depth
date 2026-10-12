@@ -5,6 +5,7 @@ import { CharmPicker, CharmStrip } from "@/components/charm-picker";
 import { ensureCharmArt } from "@/lib/charms";
 import { FontField } from "@/components/font-field";
 import { Viewer } from "@/components/viewer";
+import { CostEstimate } from "@/components/cost-estimate";
 import { productBySlug, TAG_GROUPS, type ProductSettings, type TagShape } from "@/lib/catalog";
 import { downloadBlob, EXPORT_FORMATS, exportKeychain, slugify, type ExportFormat } from "@/lib/export";
 import { useFontLibrary } from "@/lib/font-library";
@@ -12,10 +13,14 @@ import { LIMITS, MAX_CHARMS, withCharm, type KeychainModel } from "@/lib/geometr
 import { buildProduct } from "@/lib/models";
 import { encodeSpotifyBars, fetchSpotifyBars } from "@/lib/spotify-code";
 import { formatSize, fromDisplay, toDisplay, type Unit } from "@/lib/units";
+import { UndoRedoControls } from "@/components/undo-redo-controls";
+import { useUndoRedo } from "@/components/use-undo-redo";
 
 export function MakerStudio({ slug }: { slug: string }) {
   const product = productBySlug(slug);
-  const [settings, setSettings] = useState<ProductSettings | null>(product?.settings ?? null);
+  const history = useUndoRedo<ProductSettings | null>(product?.settings ?? null);
+  const settings = history.state;
+  const setSettings = history.update;
   const [unit, setUnit] = useState<Unit>("mm");
   const [format, setFormat] = useState<ExportFormat>("3mf");
   const [model, setModel] = useState<KeychainModel | null>(null);
@@ -24,10 +29,9 @@ export function MakerStudio({ slug }: { slug: string }) {
   const [exporting, setExporting] = useState(false);
   const [generating, setGenerating] = useState(false);
   const [selectedCharm, setSelectedCharm] = useState(0);
+  const [showDimensions, setShowDimensions] = useState(false);
   const [spotifyNotice, setSpotifyNotice] = useState<{ tone: "ready" | "error"; text: string } | null>(null);
   const fonts = useFontLibrary();
-  const settingsRef = useRef(settings);
-  settingsRef.current = settings;
   const spotifyAttempt = useRef(0);
 
   const needsText = product?.fields.some((field) => field.type === "text") ?? false;
@@ -91,7 +95,7 @@ export function MakerStudio({ slug }: { slug: string }) {
   }
 
   async function onGenerateSpotify() {
-    const link = settingsRef.current?.text.trim() ?? "";
+    const link = settings?.text.trim() ?? "";
     if (!link) return;
     setGenerating(true);
     setError(null);
@@ -168,6 +172,8 @@ export function MakerStudio({ slug }: { slug: string }) {
             model={visible}
             textColor={settings.textColor}
             baseColor={settings.baseColor}
+            showDimensions={showDimensions}
+            onToggleDimensions={() => setShowDimensions((current) => !current)}
             charms={settings.charms}
             onCharmMove={
               slug === "magnet" && settings.charms.length
@@ -200,6 +206,7 @@ export function MakerStudio({ slug }: { slug: string }) {
               </p>
             </div>
             <div className="pointer-events-auto flex items-center justify-end gap-2">
+              <CostEstimate model={visible} modelName={active.title} />
               <label className="sr-only" htmlFor={`${slug}-format`}>
                 Download format
               </label>
@@ -249,6 +256,12 @@ export function MakerStudio({ slug }: { slug: string }) {
       </section>
 
       <aside className="controls rounded-2xl border border-[#e6e7ec] bg-white p-4 shadow-[0_1px_2px_rgba(16,24,40,0.04)] lg:sticky lg:top-6">
+        <UndoRedoControls
+          onUndo={history.undo}
+          onRedo={history.redo}
+          canUndo={history.canUndo}
+          canRedo={history.canRedo}
+        />
         {product.fields.map((field) => {
           if (field.type === "spotify") {
             return (
