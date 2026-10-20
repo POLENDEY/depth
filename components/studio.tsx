@@ -8,6 +8,7 @@ import { FontField } from "@/components/font-field";
 import { useFontLibrary } from "@/lib/font-library";
 import { CharmPicker, CharmStrip } from "@/components/charm-picker";
 import { ensureCharmArt } from "@/lib/charms";
+import { importLogo } from "@/lib/logo";
 import { buildKeychain, LIMITS, MAX_CHARMS, withCharm, type HoleSide, type KeychainModel, type KeychainParams } from "@/lib/geometry";
 import { formatSize, fromDisplay, toDisplay, type Unit } from "@/lib/units";
 import { UndoRedoControls } from "@/components/undo-redo-controls";
@@ -23,6 +24,7 @@ const INITIAL: Settings = {
   text: "PAUL",
   fontId: "luckiest-guy",
   letterHeight: 18,
+  lineHeights: [],
   lineSpacing: 4,
   outline: 2.4,
   holeEnabled: true,
@@ -57,6 +59,7 @@ export function Studio() {
   const [more, setMore] = useState(false);
   const [selectedCharm, setSelectedCharm] = useState(0);
   const [showDimensions, setShowDimensions] = useState(false);
+  const [importingLogo, setImportingLogo] = useState(false);
   const fonts = useFontLibrary();
 
   const geometryKey = useMemo(
@@ -65,6 +68,7 @@ export function Studio() {
         text: settings.text,
         fontId: settings.fontId,
         letterHeight: settings.letterHeight,
+        lineHeights: settings.lineHeights,
         lineSpacing: settings.lineSpacing,
         outline: settings.outline,
         holeEnabled: settings.holeEnabled,
@@ -179,6 +183,26 @@ export function Studio() {
     void fonts.remove(id);
     if (settings.fontId === id) patch({ fontId: "luckiest-guy" });
   }
+  async function onImportLogo(file: File) {
+    setImportingLogo(true);
+    try {
+      const id = await importLogo(file);
+      const next = withCharm(settings.charms, id, settings.letterHeight * 1.42);
+      if (next.length === settings.charms.length) {
+        setError(`You can add up to ${MAX_CHARMS} emojis and logos.`);
+        return;
+      }
+      setSelectedCharm(next.length - 1);
+      patch({ charms: next });
+      setError(null);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not convert that logo.");
+    } finally {
+      setImportingLogo(false);
+    }
+  }
+
+  const lines = settings.text.replace(/\r\n?/g, "\n").split("\n");
   const visibleModel = settings.text.trim() ? model : null;
   const unitStep = unit === "mm" ? 0.1 : 0.01;
   const sizeLabel = visibleModel
@@ -397,7 +421,7 @@ export function Studio() {
               value={displayNumber(settings.letterHeight, unit)}
               onChange={(event) =>
                 commitNumber(event.target.value, unit, LIMITS.letterHeight, (letterHeight) =>
-                  patch({ letterHeight }),
+                  patch({ letterHeight, lineHeights: [] }),
                 )
               }
               className="h-10 w-24 rounded-lg border border-[#e6e7ec] bg-[#fafafa] px-3 text-sm tabular-nums"
@@ -424,7 +448,7 @@ export function Studio() {
               <button
                 key={preset.id}
                 type="button"
-                onClick={() => patch({ letterHeight: preset.letterHeight })}
+                onClick={() => patch({ letterHeight: preset.letterHeight, lineHeights: [] })}
                 className={`rounded-full px-2.5 py-1 text-xs ${
                   active ? "bg-zinc-900 text-white" : "bg-zinc-100 text-zinc-600 hover:bg-zinc-200"
                 }`}
@@ -434,6 +458,62 @@ export function Studio() {
             );
           })}
         </div>
+
+        {lines.length > 1 ? (
+          <div className="mt-2 grid gap-1.5 rounded-xl border border-[#eceef2] bg-[#fafafa] p-3">
+            <p className="text-[11px] font-semibold tracking-[0.14em] text-zinc-400">LINE SIZES</p>
+            {lines.map((line, index) => (
+              <label key={index} className="flex items-center gap-2 text-sm text-zinc-600">
+                <span className="w-16 shrink-0">{index === 0 ? "Top" : index === lines.length - 1 ? "Bottom" : `Line ${index + 1}`}</span>
+                <span className="min-w-0 flex-1 truncate text-xs text-zinc-400">{line.trim() || "(empty)"}</span>
+                <input
+                  type="number"
+                  inputMode="decimal"
+                  aria-label={`Letter height of line ${index + 1}`}
+                  min={toDisplay(LIMITS.letterHeight[0], unit)}
+                  max={toDisplay(LIMITS.letterHeight[1], unit)}
+                  step={unit === "mm" ? 0.5 : 0.02}
+                  value={displayNumber(settings.lineHeights?.[index] || settings.letterHeight, unit)}
+                  onChange={(event) =>
+                    commitNumber(event.target.value, unit, LIMITS.letterHeight, (height) =>
+                      patch({
+                        lineHeights: lines.map((_, lineIndex) =>
+                          lineIndex === index ? height : settings.lineHeights?.[lineIndex] || 0,
+                        ),
+                      }),
+                    )
+                  }
+                  className="h-9 w-20 rounded-lg border border-[#e6e7ec] bg-white px-2 text-sm tabular-nums"
+                />
+                <span className="w-6 text-xs text-zinc-400">{unit}</span>
+              </label>
+            ))}
+            <p className="text-xs text-zinc-400">Change one line without touching the others. Size above resets every line.</p>
+          </div>
+        ) : null}
+
+        <Field label="Logo" htmlFor="logo-file">
+          <input
+            id="logo-file"
+            type="file"
+            accept=".svg,.png,image/svg+xml,image/png"
+            className="sr-only"
+            onChange={(event) => {
+              const file = event.target.files?.[0];
+              event.target.value = "";
+              if (file) void onImportLogo(file);
+            }}
+          />
+          <label
+            htmlFor="logo-file"
+            className="inline-flex h-10 cursor-pointer items-center rounded-lg border border-[#e6e7ec] bg-white px-3 text-sm text-zinc-700 hover:bg-zinc-50"
+          >
+            {importingLogo ? "Converting…" : "Import SVG or PNG"}
+          </label>
+          <p className="mt-1 text-xs text-zinc-400">
+            The logo becomes raised 3D in the text color, on the base. Drag it in the preview, and set its size below.
+          </p>
+        </Field>
 
         {settings.charms.length ? (
           <Field label="Icon" htmlFor="icon-size">
@@ -460,7 +540,7 @@ export function Studio() {
               <span className="text-sm text-zinc-500">{unit}</span>
             </div>
             <p className="mt-1 text-xs text-zinc-400">
-              Size of the selected emoji. Drag each one in the preview to move it.
+              Size of the selected emoji or logo. Drag each one in the preview to move it.
             </p>
           </Field>
         ) : null}

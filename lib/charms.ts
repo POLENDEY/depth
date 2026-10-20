@@ -73,8 +73,50 @@ export function isEmojiCharm(id: string) {
   return Boolean(charm && FACE_GROUPS.has(charm.group));
 }
 
+const LOGO_PREFIX = "logo-";
+const logoPreviews = new Map<string, string>();
+let logoCount = 0;
+
+export function isLogo(id: string) {
+  return id.startsWith(LOGO_PREFIX);
+}
+
+// Rings are centered on 0 with the longer side 0.98 wide, y up, holes wound opposite their outlines.
+export function registerLogo(rings: Ring[], preview: string) {
+  logoCount += 1;
+  const id = `${LOGO_PREFIX}${Date.now().toString(36)}-${logoCount}`;
+  const outlines = rings.filter((ring) => ringArea(ring) > 0);
+  art.set(id, { body: outlines, mark: rings, pupil: [] });
+  logoPreviews.set(id, preview);
+  return id;
+}
+
+export function logoPreview(id: string) {
+  return logoPreviews.get(id) ?? null;
+}
+
+function ringArea(ring: Ring) {
+  let area = 0;
+  for (let index = 0; index < ring.length; index += 1) {
+    const [x1, y1] = ring[index];
+    const [x2, y2] = ring[(index + 1) % ring.length];
+    area += x1 * y2 - x2 * y1;
+  }
+  return area / 2;
+}
+
+function artFor(id: string) {
+  if (isLogo(id)) return art.get(id);
+  const charm = findCharm(id);
+  return charm ? art.get(charm.id) : undefined;
+}
+
 export async function ensureCharmArt(id: string) {
   if (!id) return;
+  if (isLogo(id)) {
+    if (!art.has(id)) throw new Error("That logo is no longer loaded. Import it again.");
+    return;
+  }
   const charm = findCharm(id);
   if (!charm) throw new Error("That emoji is not available.");
   if (art.has(charm.id)) return;
@@ -92,8 +134,7 @@ function placeRings(rings: Ring[], cx: number, cy: number, size: number) {
 }
 
 export function charmLayers(id: string, cx: number, cy: number, size: number) {
-  const charm = findCharm(id);
-  const loaded = charm ? art.get(charm.id) : undefined;
+  const loaded = artFor(id);
   if (!loaded || (!loaded.body.length && !loaded.mark.length)) return null;
   return {
     body: placeRings(loaded.body, cx, cy, size),
@@ -103,8 +144,7 @@ export function charmLayers(id: string, cx: number, cy: number, size: number) {
 }
 
 export function charmRings(id: string, cx: number, cy: number, size: number, _segments: number) {
-  const charm = findCharm(id);
-  const loaded = charm ? art.get(charm.id) : undefined;
+  const loaded = artFor(id);
   if (!loaded) return [];
   return placeRings([...loaded.body, ...loaded.mark, ...loaded.pupil], cx, cy, size).map((ring) => ({
     ...ring,

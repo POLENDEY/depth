@@ -2,6 +2,7 @@ import type { Font } from "opentype.js";
 import * as THREE from "three";
 import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js";
 import { TAG_GROUPS, type ProductSettings, type TagShape } from "./catalog";
+import { charmLayers } from "./charms";
 import { decodeSpotifyBars, spotifyLogoLoops, type SpotifyPoint } from "./spotify-code";
 import { familiarParts, type TagPoint } from "./tag-shapes";
 import {
@@ -34,6 +35,8 @@ export function buildProduct(
       return spotifyKeychain(font, settings, quality);
     case "articulated-name":
       return articulated(requiredFont(font), settings, quality, curve);
+    case "flexi-keychain":
+      return flexiKeychain(requiredFont(font), settings, quality);
     case "pen-holder":
       return penHolder(requiredFont(font), settings, quality, curve);
     case "picture-frame":
@@ -647,6 +650,161 @@ function articulated(font: Font, settings: ProductSettings, quality: MeshQuality
     ...layout.warnings,
     "Print it flat. The hinge pin is captured, with about 0.3 mm of clearance so the links can still flex.",
   ]);
+}
+
+// Print-in-place flexi chain: each bead's tongue sits between the next bead's top and bottom
+// fork layers, turning on a pin hidden inside, so from above every joint reads as one flat bar.
+const FLEXI_Z_CLEAR = 0.35;
+const FLEXI_PIN_CLEAR = 0.35;
+const FLEXI_NOSE_CLEAR = 0.45;
+
+export function flexiMetrics(size: number, thickness: number) {
+  const gap = Math.max(6, size * 0.36);
+  const nose = gap / 2 - FLEXI_NOSE_CLEAR;
+  const lip = clamp(thickness * 0.27, 1.4, 2);
+  const pin = clamp(size * 0.065, 1.1, 1.5);
+  return {
+    gap,
+    nose,
+    lip,
+    pin,
+    bore: pin + FLEXI_PIN_CLEAR,
+    tongueBottom: lip + FLEXI_Z_CLEAR,
+    tongueTop: thickness - lip - FLEXI_Z_CLEAR,
+  };
+}
+
+function flexiKeychain(font: Font, settings: ProductSettings, quality: MeshQuality) {
+  const size = clamp(settings.linkSize || 18, 14, 26);
+  const thickness = clamp(settings.baseThickness, 5, 8);
+  const capDepth = clamp(settings.textThickness, 0.8, 2.4);
+  const holeRadius = clamp(settings.holeDiameter, 3, 6) / 2;
+  const chars = Array.from(settings.text.normalize("NFC"))
+    .filter((char) => char.trim())
+    .slice(0, 16);
+  const icons = settings.charms.slice(0, Math.max(0, 16 - chars.length));
+  const tiles = chars.length + icons.length;
+  if (!tiles) throw new Error("Type a name or add an emoji.");
+
+  const fine = quality === "print" ? 40 : 20;
+  const joint = flexiMetrics(size, thickness);
+  const pitch = size + joint.gap;
+  const embed = 0.6;
+  const letterBox = size * 0.74;
+  const warnings = [
+    "Print it flat with no supports. Each joint is a print-in-place hinge with a hidden pin, so the beads flex once it is off the bed. Add a metal split ring through the loop.",
+  ];
+  const bodies: THREE.BufferGeometry[] = [];
+  const caps: THREE.BufferGeometry[] = [];
+
+  for (let index = 0; index < tiles; index += 1) {
+    const cx = index * pitch + size / 2;
+    const bead = extrudeShapes([roundedRect(size, size, size * 0.26)], thickness, quality === "print" ? 12 : 6);
+    bead.translate(cx, 0, 0);
+    bodies.push(bead);
+
+    const icon =
+      index < chars.length
+        ? flexiLetter(font, chars[index], letterBox, size * 0.66, capDepth + FUSE, quality)
+        : flexiEmoji(icons[index - chars.length].id, size * 0.72, capDepth + FUSE);
+    if (icon) {
+      icon.translate(cx, 0, thickness - FUSE);
+      caps.push(icon);
+    } else if (index >= chars.length) {
+      warnings.push("One emoji did not load. Add it again.");
+    }
+
+    if (index < tiles - 1) {
+      const leftFace = cx + size / 2;
+      const jointX = leftFace + joint.gap / 2;
+      const reach = joint.gap / 2 + embed;
+      const tongue = extrudeShapes(
+        [noseBar(reach, joint.nose, joint.bore)],
+        joint.tongueTop - joint.tongueBottom,
+        fine,
+      );
+      tongue.translate(jointX, 0, joint.tongueBottom);
+      bodies.push(tongue);
+      for (const z of [0, thickness - joint.lip]) {
+        const fork = extrudeShapes([noseBar(reach, joint.nose)], joint.lip, fine);
+        fork.rotateZ(Math.PI);
+        fork.translate(jointX, 0, z);
+        bodies.push(fork);
+      }
+      const pin = extrudeShapes([disk(joint.pin)], thickness - joint.lip * 2 + 0.4, fine);
+      pin.translate(jointX, 0, joint.lip - 0.2);
+      bodies.push(pin);
+    }
+  }
+
+  const loopRadius = holeRadius + 2;
+  const loopX = -(holeRadius + 1.7);
+  const loop = extrudeShapes([noseBar(-loopX + embed, loopRadius, holeRadius)], thickness, fine);
+  loop.rotateZ(Math.PI);
+  loop.translate(loopX, 0, 0);
+  bodies.push(loop);
+
+  const span = tiles * pitch - joint.gap + loopRadius - loopX;
+  if (span > 248) warnings[0] += " This name is long for a 256 mm bed. Remove a letter or use a smaller bead.";
+  return pack(fuse(caps), fuse(bodies), warnings);
+}
+
+// A bar from x = -length to 0, ending in a half-round nose of radius `radius` centered at 0.
+function noseBar(length: number, radius: number, bore?: number) {
+  const shape = new THREE.Shape();
+  shape.moveTo(-length, -radius);
+  shape.lineTo(0, -radius);
+  shape.absarc(0, 0, radius, -Math.PI / 2, Math.PI / 2, false);
+  shape.lineTo(-length, radius);
+  shape.closePath();
+  if (bore) {
+    const hole = new THREE.Path();
+    hole.absarc(0, 0, bore, 0, Math.PI * 2, true);
+    shape.holes.push(hole);
+  }
+  return shape;
+}
+
+function flexiLetter(font: Font, char: string, maxWidth: number, capHeight: number, depth: number, quality: MeshQuality) {
+  try {
+    const glyph = layoutText(font, char, capHeight, quality).glyphs[0];
+    if (!glyph) return null;
+    const width = Math.max(0.1, glyph.maxX - glyph.minX);
+    const height = Math.max(0.1, glyph.maxY - glyph.minY);
+    const scale = Math.min(1, maxWidth / width, maxWidth / height);
+    const mesh = extrudeShapes(glyph.shapes, depth, 4);
+    mesh.translate(-(glyph.minX + glyph.maxX) / 2, -(glyph.minY + glyph.maxY) / 2, 0);
+    mesh.scale(scale, scale, 1);
+    return mesh;
+  } catch {
+    return null;
+  }
+}
+
+function flexiEmoji(id: string, target: number, depth: number) {
+  const layers = charmLayers(id, 0, 0, 1);
+  if (!layers) return null;
+  const toShape = (ring: { points: { x: number; y: number }[] }) =>
+    new THREE.Shape(ring.points.map((point) => new THREE.Vector2(point.x, point.y)));
+  const area = (ring: { points: { x: number; y: number }[] }) => Math.abs(THREE.ShapeUtils.area(ring.points.map((point) => new THREE.Vector2(point.x, point.y))));
+  const solids = (layers.body.length ? layers.body : layers.mark).filter((ring) => ring.points.length >= 3);
+  if (!solids.length) return null;
+  const largest = Math.max(...solids.map(area));
+  const details = layers.body.length
+    ? [...layers.mark, ...layers.pupil].filter((ring) => {
+        const share = area(ring) / largest;
+        return ring.points.length >= 3 && share > 0.004 && share < 0.45;
+      })
+    : [];
+  const shapes = cutShapes(solids.map(toShape), details.map(toShape), 48);
+  if (!shapes.length) return null;
+  const mesh = extrudeShapes(shapes, depth, 1);
+  mesh.computeBoundingBox();
+  const box = mesh.boundingBox!;
+  const span = Math.max(box.max.x - box.min.x, box.max.y - box.min.y) || 1;
+  mesh.translate(-(box.min.x + box.max.x) / 2, -(box.min.y + box.max.y) / 2, 0);
+  mesh.scale(target / span, target / span, 1);
+  return mesh;
 }
 
 function blockArticulated(

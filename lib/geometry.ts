@@ -19,6 +19,7 @@ export type CharmBox = { minX: number; minY: number; maxX: number; maxY: number 
 export type KeychainParams = {
   text: string;
   letterHeight: number;
+  lineHeights?: number[];
   lineSpacing: number;
   outline: number;
   holeEnabled: boolean;
@@ -98,6 +99,9 @@ export function buildKeychain(
     ...params,
     text,
     letterHeight: clamp(params.letterHeight, LIMITS.letterHeight[0], LIMITS.letterHeight[1]),
+    lineHeights: (params.lineHeights ?? []).map((height) =>
+      Number(height) > 0 ? clamp(Number(height), LIMITS.letterHeight[0], LIMITS.letterHeight[1]) : 0,
+    ),
     lineSpacing: clamp(params.lineSpacing, LIMITS.lineSpacing[0], LIMITS.lineSpacing[1]),
     outline: clamp(params.outline, LIMITS.outline[0], LIMITS.outline[1]),
     holeDiameter: clamp(params.holeDiameter, LIMITS.holeDiameter[0], LIMITS.holeDiameter[1]),
@@ -173,6 +177,7 @@ function getProfile(font: Font, params: KeychainParams, quality: MeshQuality) {
     font.names?.fontFamily?.en ?? font.unitsPerEm,
     params.text,
     params.letterHeight.toFixed(2),
+    (params.lineHeights ?? []).join(","),
     params.lineSpacing.toFixed(2),
     params.outline.toFixed(2),
     params.holeEnabled,
@@ -195,7 +200,15 @@ function getProfile(font: Font, params: KeychainParams, quality: MeshQuality) {
     warnings.push(`This font has no glyph for ${missing.join(" ")}. Those characters were skipped.`);
   }
 
-  const rings = textToRings(font, params.text, params.letterHeight, params.lineSpacing, settings.maxCurveSteps);
+  const rings = textToRings(
+    font,
+    params.text,
+    params.letterHeight,
+    params.lineSpacing,
+    settings.maxCurveSteps,
+    1.4,
+    params.lineHeights ?? [],
+  );
   if (!rings.length) {
     throw new Error("That text has no printable outlines. Try letters or numbers.");
   }
@@ -306,26 +319,35 @@ function textToRings(
   lineSpacing: number,
   maxCurveSteps: number,
   stepMm = 1.4,
+  lineHeights?: number[],
 ) {
   const sample = font.charToGlyph("H");
   const capUnits = sample.yMax || font.ascender || font.unitsPerEm * 0.7;
-  const fontSize = (letterHeight * font.unitsPerEm) / capUnits;
-  const scale = fontSize / font.unitsPerEm;
   const commands: PathCommand[] = [];
   const lines = text.replace(/\r\n?/g, "\n").split("\n");
-
-  for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
-    const chars = Array.from(lines[lineIndex]);
-    const baseline = lineIndex * (letterHeight + lineSpacing);
+  const advance = (chars: string[], scale: number) => {
+    const offsets: number[] = [];
     let x = 0;
-
     for (let index = 0; index < chars.length; index += 1) {
       const glyph = font.charToGlyph(chars[index]);
-      if (index > 0) {
-        x += font.getKerningValue(font.charToGlyph(chars[index - 1]), glyph) * scale;
-      }
-      commands.push(...glyph.getPath(x, baseline, fontSize, {}, font).commands);
+      if (index > 0) x += font.getKerningValue(font.charToGlyph(chars[index - 1]), glyph) * scale;
+      offsets.push(x);
       x += (glyph.advanceWidth ?? font.unitsPerEm * 0.5) * scale;
+    }
+    return { offsets, width: x };
+  };
+
+  let baseline = 0;
+  for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
+    const height = lineHeights?.[lineIndex] || letterHeight;
+    const fontSize = (height * font.unitsPerEm) / capUnits;
+    const scale = fontSize / font.unitsPerEm;
+    const chars = Array.from(lines[lineIndex]);
+    if (lineIndex > 0) baseline += lineSpacing + height;
+    const { offsets, width } = advance(chars, scale);
+    const start = lineHeights ? -width / 2 : 0;
+    for (let index = 0; index < chars.length; index += 1) {
+      commands.push(...font.charToGlyph(chars[index]).getPath(start + offsets[index], baseline, fontSize, {}, font).commands);
     }
   }
 

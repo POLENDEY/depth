@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { charmGroups, findCharm, listCharms, type CharmGroup } from "@/lib/charms";
+import { charmGroups, findCharm, listCharms, logoPreview, type CharmGroup } from "@/lib/charms";
 
 export function CharmPicker({ onAdd, onClear }: { onAdd: (id: string) => void; onClear: () => void }) {
   const [open, setOpen] = useState(false);
@@ -101,6 +101,7 @@ export function CharmStrip({
     <ul className="mt-2 flex flex-wrap gap-1">
       {charms.map((charm, index) => {
         const found = findCharm(charm.id);
+        const logo = logoPreview(charm.id);
         return (
           <li key={`${charm.id}-${index}`}>
             <span
@@ -110,16 +111,20 @@ export function CharmStrip({
             >
               <button
                 type="button"
-                aria-label={found?.label ?? "Emoji"}
+                aria-label={logo ? "Logo" : (found?.label ?? "Emoji")}
                 aria-pressed={index === selected}
                 onClick={() => onSelect(index)}
                 className="grid h-8 w-8 place-items-center"
               >
-                {found ? <EmojiArt id={found.id} /> : null}
+                {logo ? (
+                  <img src={logo} alt="" draggable={false} className="h-6 w-6 object-contain" />
+                ) : found ? (
+                  <EmojiArt id={found.id} />
+                ) : null}
               </button>
               <button
                 type="button"
-                aria-label={`Remove ${found?.label ?? "emoji"}`}
+                aria-label={`Remove ${logo ? "logo" : (found?.label ?? "emoji")}`}
                 onClick={() => onRemove(index)}
                 className="grid h-8 w-6 place-items-center text-sm text-zinc-400 hover:text-zinc-700"
               >

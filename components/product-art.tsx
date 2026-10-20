@@ -6,6 +6,7 @@ export function ProductArt({ slug }: { slug: string }) {
   if (slug === "spotify-code") return <SpotifyArt />;
   if (slug === "cable-tag") return <CableArt />;
   if (slug === "articulated-name") return <ArticulatedArt />;
+  if (slug === "flexi-keychain") return <FlexiArt />;
   if (slug === "pen-holder") return <PenArt />;
   if (slug === "picture-frame") return <FrameArt />;
   if (slug === "nameplate") return <PlateArt />;
@@ -52,6 +53,28 @@ function KeychainArt() {
       <text x="86" y="142" fill="#f4f4f5" fontFamily="Pacifico, cursive" fontSize="64">
         nora
       </text>
+    </Scene>
+  );
+}
+
+function FlexiArt() {
+  const letters = ["L", "O", "V", "E"];
+  return (
+    <Scene id="flexi" from="#efe3d2" to="#e2cfb8">
+      <circle cx="40" cy="120" r="17" fill="none" stroke="#9ca3af" strokeWidth="4" />
+      <rect x="46" y="112" width="22" height="16" rx="8" fill="#f05a28" />
+      {letters.map((letter, index) => {
+        const x = 64 + index * 58;
+        return (
+          <g key={letter}>
+            {index < letters.length - 1 ? <rect x={x + 40} y="111" width="26" height="18" rx="9" fill="#d94a1c" /> : null}
+            <rect x={x} y="96" width="46" height="46" rx="12" fill="#f05a28" />
+            <text x={x + 23} y="132" textAnchor="middle" fill="#f8fafc" fontFamily="Lilita One, sans-serif" fontSize="34">
+              {letter}
+            </text>
+          </g>
+        );
+      })}
     </Scene>
   );
 }

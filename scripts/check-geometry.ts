@@ -24,7 +24,7 @@ import { unzipSync } from "fflate";
 import { PRODUCTS } from "../lib/catalog";
 import { buildKeychain } from "../lib/geometry";
 import { exportKeychain } from "../lib/export";
-import { assertArticulatedHingeRound, assertBlockChain, buildProduct } from "../lib/models";
+import { assertArticulatedHingeRound, assertBlockChain, buildProduct, flexiMetrics } from "../lib/models";
 
 const defaults = {
   text: "PAUL",
@@ -137,6 +137,7 @@ async function main() {
 
   assertArticulatedHingeRound();
   assertBlockChain();
+  assertFlexi();
 
   model.text.dispose();
   model.base.dispose();
@@ -145,6 +146,39 @@ async function main() {
   holeless.text.dispose();
   holeless.base.dispose();
   console.log("geometry ok");
+}
+
+function assertFlexi() {
+  for (const size of [14, 18, 26]) {
+    for (const thickness of [5, 6, 8]) {
+      const joint = flexiMetrics(size, thickness);
+      if (joint.bore - joint.pin < 0.3) throw new Error("Flexi pin is too tight to turn after printing");
+      if (joint.nose - joint.bore < 0.9) throw new Error("Flexi tongue wall around the pin is too thin");
+      if (joint.tongueTop - joint.tongueBottom < 1.4) throw new Error("Flexi tongue is too thin");
+      if (joint.gap / 2 - joint.nose < 0.3) throw new Error("Flexi joint nose touches the next bead");
+    }
+  }
+  const product = PRODUCTS.find((entry) => entry.slug === "flexi-keychain");
+  if (!product) throw new Error("Flexi keychain is missing from the catalog");
+  const lilita = parseFont("public/fonts/lilita-one.ttf");
+  const one = buildProduct("flexi-keychain", lilita, { ...product.settings, text: "A" }, "preview");
+  const four = buildProduct("flexi-keychain", lilita, { ...product.settings, text: "L O V E" }, "preview");
+  const joint = flexiMetrics(product.settings.linkSize, product.settings.baseThickness);
+  const gain = four.width - one.width;
+  const pitch = product.settings.linkSize + joint.gap;
+  if (Math.abs(gain - pitch * 3) > 0.05) throw new Error(`Flexi beads are not evenly spaced (${gain.toFixed(2)} mm)`);
+  if (Math.abs(four.height - product.settings.linkSize) > 0.05) throw new Error("Flexi beads are not square");
+  four.base.computeBoundingBox();
+  four.text.computeBoundingBox();
+  const body = four.base.boundingBox!;
+  const letters = four.text.boundingBox!;
+  if (letters.min.z < body.max.z - 0.3 || letters.max.z < body.max.z + 0.6) {
+    throw new Error("Flexi letters are not raised on the beads");
+  }
+  for (const built of [one, four]) {
+    built.text.dispose();
+    built.base.dispose();
+  }
 }
 
 void main();

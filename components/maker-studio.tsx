@@ -428,7 +428,11 @@ export function MakerStudio({ slug }: { slug: string }) {
                     patch({ charms: next });
                   }}
                 />
-                {settings.charms.length ? (
+                {slug === "flexi-keychain" ? (
+                  <p className="mt-1 text-xs text-zinc-400">
+                    Each emoji gets its own bead after the letters, the same size as the others.
+                  </p>
+                ) : settings.charms.length ? (
                   <div className="mt-2">
                     <NumberRow
                       id={`${slug}-charm-size`}
@@ -485,7 +489,12 @@ export function MakerStudio({ slug }: { slug: string }) {
           }
           if (field.type === "number") {
             if (field.key === "linkHeight" && settings.linkStyle === "block") return null;
-            if ((field.key === "linkSize" || field.key === "letterGap") && settings.linkStyle !== "block") return null;
+            if (
+              (field.key === "linkSize" || field.key === "letterGap") &&
+              settings.linkStyle !== "block" &&
+              slug !== "flexi-keychain"
+            )
+              return null;
             return (
               <NumberRow
                 key={field.key}
