@@ -3,7 +3,7 @@ import * as THREE from "three";
 import { GLTFExporter } from "three/examples/jsm/exporters/GLTFExporter.js";
 import { OBJExporter } from "three/examples/jsm/exporters/OBJExporter.js";
 import { STLExporter } from "three/examples/jsm/exporters/STLExporter.js";
-import type { KeychainModel } from "./geometry";
+import { hasLineColors, textSlotColors, type KeychainModel } from "./geometry";
 
 export type ExportFormat = "3mf" | "stl" | "obj" | "glb";
 
@@ -21,10 +21,12 @@ export async function exportKeychain(
   baseColor: string,
   name: string,
   kind = "keychain",
+  lineColors: string[] = [],
 ) {
+  const textColors = textSlotColors(model.text, textColor, lineColors);
   const group = new THREE.Group();
   group.add(meshFrom(model.base, "Base", baseColor));
-  group.add(meshFrom(model.text, "Text", textColor));
+  group.add(hasLineColors(model.text) ? multiMesh(model.text, "Text", textColors) : meshFrom(model.text, "Text", textColor));
 
   try {
     if (format === "stl") {
@@ -59,7 +61,7 @@ export async function exportKeychain(
     }
 
     return {
-      blob: new Blob([build3mf(model, textColor, baseColor, name)], { type: "model/3mf" }),
+      blob: new Blob([build3mf(model, textColors, baseColor, name)], { type: "model/3mf" }),
       filename: `${name}-${kind}.3mf`,
     };
   } finally {
@@ -110,22 +112,47 @@ function meshFrom(geometry: THREE.BufferGeometry, name: string, color: string) {
   return mesh;
 }
 
-function build3mf(model: KeychainModel, textColor: string, baseColor: string, name: string) {
-  const textHex = colorHex(textColor);
+function multiMesh(geometry: THREE.BufferGeometry, name: string, colors: string[]) {
+  const materials = colors.map(
+    (color, slot) => new THREE.MeshStandardMaterial({ name: `${name} ${slot + 1}`, color, roughness: 0.5, metalness: 0.02 }),
+  );
+  const mesh = new THREE.Mesh(geometry, materials);
+  mesh.name = name;
+  return mesh;
+}
+
+// Bambu Studio / OrcaSlicer filament codes for painted triangles: filament 1, 2, 3, …
+const PAINT_CODES = ["4", "8", "0C", "1C", "2C", "3C", "4C", "5C", "6C", "7C", "8C", "9C", "AC", "BC", "CC", "DC"];
+
+function build3mf(model: KeychainModel, textColors: string[], baseColor: string, name: string) {
   const baseHex = colorHex(baseColor);
+  const palette: string[] = [];
+  for (const color of textColors) {
+    const hex = colorHex(color);
+    if (!palette.includes(hex)) palette.push(hex);
+  }
+  const slotIndex = textColors.map((color) => palette.indexOf(colorHex(color)));
+  const filament = (paletteIndex: number) => PAINT_CODES[Math.min(PAINT_CODES.length - 1, paletteIndex === 0 ? 0 : paletteIndex + 1)];
+  const triangleColor = (triangle: number) => {
+    if (!hasLineColors(model.text)) return { index: 0, paint: filament(0) };
+    const vertex = triangle * 3;
+    const group = model.text.groups.find((entry) => vertex >= entry.start && vertex < entry.start + entry.count);
+    const index = slotIndex[group?.materialIndex ?? 0] ?? 0;
+    return { index, paint: filament(index) };
+  };
   const modelXml = `<?xml version="1.0" encoding="UTF-8"?>
 <model unit="millimeter" xml:lang="en-US" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02" xmlns:m="http://schemas.microsoft.com/3dmanufacturing/material/2015/02" requiredextensions="m">
   <metadata name="Application">Keychain Generator</metadata>
   <metadata name="Title">${escapeXml(name)} keychain</metadata>
   <resources>
     <m:colorgroup id="1">
-      <m:color color="${textHex}"/>
+      ${palette.map((hex) => `<m:color color="${hex}"/>`).join("\n      ")}
     </m:colorgroup>
     <m:colorgroup id="2">
       <m:color color="${baseHex}"/>
     </m:colorgroup>
-    ${objectXml(3, "Text", model.text, 1, 0, "4")}
-    ${objectXml(4, "Base", model.base, 2, 1, "8")}
+    ${objectXml(3, "Text", model.text, 1, triangleColor)}
+    ${objectXml(4, "Base", model.base, 2, () => ({ index: 0, paint: "8" }))}
   </resources>
   <build>
     <item objectid="3" transform="1 0 0 0 1 0 0 0 1 0 0 0"/>
@@ -156,8 +183,7 @@ function objectXml(
   name: string,
   geometry: THREE.BufferGeometry,
   colorGroupId: number,
-  colorIndex: number,
-  paintColor: string,
+  colorOf: (triangle: number) => { index: number; paint: string },
 ) {
   const position = geometry.getAttribute("position");
   const index = geometry.getIndex();
@@ -173,11 +199,12 @@ function objectXml(
     const a = index ? index.getX(triangle * 3) : triangle * 3;
     const b = index ? index.getX(triangle * 3 + 1) : triangle * 3 + 1;
     const c = index ? index.getX(triangle * 3 + 2) : triangle * 3 + 2;
+    const color = colorOf(triangle);
     triangles.push(
-      `<triangle v1="${a}" v2="${b}" v3="${c}" pid="${colorGroupId}" p1="${colorIndex}" p2="${colorIndex}" p3="${colorIndex}" paint_color="${paintColor}"/>`,
+      `<triangle v1="${a}" v2="${b}" v3="${c}" pid="${colorGroupId}" p1="${color.index}" p2="${color.index}" p3="${color.index}" paint_color="${color.paint}"/>`,
     );
   }
-  return `<object id="${id}" type="model" name="${escapeXml(name)}" pid="${colorGroupId}" pindex="${colorIndex}">
+  return `<object id="${id}" type="model" name="${escapeXml(name)}" pid="${colorGroupId}" pindex="${colorOf(0).index}">
       <mesh>
         <vertices>${vertices.join("")}</vertices>
         <triangles>${triangles.join("")}</triangles>

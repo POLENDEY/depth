@@ -2,6 +2,7 @@ import ClipperLib from "clipper-lib";
 import type { Path, Paths, PolyTree } from "clipper-lib";
 import type { Font, PathCommand } from "opentype.js";
 import * as THREE from "three";
+import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js";
 import { charmLayers, charmRings, isEmojiCharm } from "./charms";
 
 export type HoleSide = "left" | "right";
@@ -75,8 +76,10 @@ const QUALITY = {
 
 const profileCache = new Map<string, Profile>();
 
+type TextPart = { shapes: THREE.Shape[]; slot: number };
+
 type Profile = {
-  textShapes: THREE.Shape[];
+  textParts: TextPart[];
   baseShapes: THREE.Shape[];
   warnings: string[];
   charmBounds: CharmBox[];
@@ -91,8 +94,8 @@ export function buildKeychain(
   quality: MeshQuality,
 ): KeychainModel {
   const text = params.text.normalize("NFC").slice(0, MAX_CHARS);
-  if (!text.trim()) {
-    throw new Error("Type a name to generate a keychain.");
+  if (!text.trim() && !params.charms?.length) {
+    throw new Error("Type a name or add a logo to generate a keychain.");
   }
 
   const safe: KeychainParams = {
@@ -126,7 +129,7 @@ export function buildKeychain(
   };
 
   const profile = getProfile(font, safe, quality);
-  const textGeometry = extrude(profile.textShapes, safe.textThickness + FUSE);
+  const textGeometry = extrudeParts(profile.textParts, safe.textThickness + FUSE);
   textGeometry.translate(0, 0, safe.baseThickness - FUSE);
   const baseGeometry = extrude(profile.baseShapes, safe.baseThickness);
 
@@ -151,7 +154,7 @@ export function buildKeychain(
   if (size.x > 140) {
     warnings.push("This is wide for a pocket keychain. Lower the letter height to shrink it.");
   }
-  if (size.x < 35) {
+  if (size.x < 35 && text.trim()) {
     warnings.push("This is very small. Raise the letter height so the letters stay printable.");
   }
 
@@ -200,7 +203,7 @@ function getProfile(font: Font, params: KeychainParams, quality: MeshQuality) {
     warnings.push(`This font has no glyph for ${missing.join(" ")}. Those characters were skipped.`);
   }
 
-  const rings = textToRings(
+  const lineRings = textLineRings(
     font,
     params.text,
     params.letterHeight,
@@ -209,10 +212,12 @@ function getProfile(font: Font, params: KeychainParams, quality: MeshQuality) {
     1.4,
     params.lineHeights ?? [],
   );
-  if (!rings.length) {
+  const rings = lineRings.flat();
+  const hasLetters = rings.length > 0;
+  if (!hasLetters && !params.charms.length) {
     throw new Error("That text has no printable outlines. Try letters or numbers.");
   }
-  const letters = ringBounds(rings);
+  const letters = hasLetters ? ringBounds(rings) : { minX: 0, minY: 0, maxX: 0, maxY: 0 };
   const centerX = (letters.minX + letters.maxX) / 2;
   const centerY = (letters.minY + letters.maxY) / 2;
 
@@ -220,15 +225,29 @@ function getProfile(font: Font, params: KeychainParams, quality: MeshQuality) {
   const charmBounds = charmPiece.bounds;
   const charmPaths = charmPiece.text;
 
-  const letterPaths = clean(unionPaths(toClipper(rings)));
-  if (!letterPaths.length) {
+  const letterPaths = hasLetters ? clean(unionPaths(toClipper(rings))) : [];
+  if (hasLetters && !letterPaths.length) {
     throw new Error("The letters could not be combined. Try a different font.");
   }
-  const textPaths = charmPaths.length ? clean(unionPaths([...letterPaths, ...charmPaths])) : letterPaths;
+  if (!letterPaths.length && !charmPaths.length) {
+    throw new Error("That logo has no printable shape. Try another file.");
+  }
+  const textPaths = !charmPaths.length
+    ? letterPaths
+    : letterPaths.length
+      ? clean(unionPaths([...letterPaths, ...charmPaths]))
+      : charmPaths;
 
-  let letterBasePaths = offsetPaths(letterPaths, params.outline, settings.arcTolerance);
-  if (spanX(letterBasePaths) + 0.2 < spanX(letterPaths)) {
-    letterBasePaths = offsetPaths(reversePaths(letterPaths), params.outline, settings.arcTolerance);
+  let letterBasePaths = offsetPaths(letterPaths.length ? letterPaths : textPaths, params.outline, settings.arcTolerance);
+  if (spanX(letterBasePaths) + 0.2 < spanX(letterPaths.length ? letterPaths : textPaths)) {
+    letterBasePaths = offsetPaths(
+      reversePaths(letterPaths.length ? letterPaths : textPaths),
+      params.outline,
+      settings.arcTolerance,
+    );
+  }
+  if (!letterPaths.length && charmPiece.base.length) {
+    letterBasePaths = clean(unionPaths([...letterBasePaths, ...charmPiece.base]));
   }
   const letterBox = pathBounds(letterBasePaths);
   let basePaths = offsetPaths(textPaths, params.outline, settings.arcTolerance);
@@ -242,7 +261,7 @@ function getProfile(font: Font, params: KeychainParams, quality: MeshQuality) {
   }
 
   const eyeballs = eyeBaseShapes(charmPiece.eyes);
-  const textShapes = punchedTextShapes(textPaths, charmPiece.eyes);
+  const textParts = splitTextByLine(lineRings, textPaths, charmPaths, charmPiece.eyes);
   const holeSpot = params.holeEnabled ? placeHole(letterBox, params, settings.circleSegments) : null;
   if (holeSpot) {
     const withTab = clean(unionPaths([...basePaths, holeSpot.outer]));
@@ -252,7 +271,7 @@ function getProfile(font: Font, params: KeychainParams, quality: MeshQuality) {
       warnings.push("The keyring hole did not cut through. Increase the hole or move it outward.");
     }
     const profile = {
-      textShapes,
+      textParts,
       baseShapes: [...shapes.shapes, ...eyeballs],
       warnings,
       charmBounds,
@@ -265,7 +284,7 @@ function getProfile(font: Font, params: KeychainParams, quality: MeshQuality) {
   }
 
   const profile = {
-    textShapes,
+    textParts,
     baseShapes: [...pathsToShapes(basePaths), ...eyeballs],
     warnings,
     charmBounds,
@@ -321,9 +340,21 @@ function textToRings(
   stepMm = 1.4,
   lineHeights?: number[],
 ) {
+  return textLineRings(font, text, letterHeight, lineSpacing, maxCurveSteps, stepMm, lineHeights).flat();
+}
+
+function textLineRings(
+  font: Font,
+  text: string,
+  letterHeight: number,
+  lineSpacing: number,
+  maxCurveSteps: number,
+  stepMm = 1.4,
+  lineHeights?: number[],
+) {
   const sample = font.charToGlyph("H");
   const capUnits = sample.yMax || font.ascender || font.unitsPerEm * 0.7;
-  const commands: PathCommand[] = [];
+  const perLine: Ring[][] = [];
   const lines = text.replace(/\r\n?/g, "\n").split("\n");
   const advance = (chars: string[], scale: number) => {
     const offsets: number[] = [];
@@ -346,12 +377,14 @@ function textToRings(
     if (lineIndex > 0) baseline += lineSpacing + height;
     const { offsets, width } = advance(chars, scale);
     const start = lineHeights ? -width / 2 : 0;
+    const commands: PathCommand[] = [];
     for (let index = 0; index < chars.length; index += 1) {
       commands.push(...font.charToGlyph(chars[index]).getPath(start + offsets[index], baseline, fontSize, {}, font).commands);
     }
+    perLine.push(commandsToRings(commands, maxCurveSteps, stepMm).filter((ring) => Math.abs(signedArea(ring)) > 0.12));
   }
 
-  return commandsToRings(commands, maxCurveSteps, stepMm).filter((ring) => Math.abs(signedArea(ring)) > 0.12);
+  return perLine;
 }
 
 function commandsToRings(commands: PathCommand[], maxCurveSteps: number, stepMm = 1.4) {
@@ -1147,6 +1180,27 @@ function radialStats(path: Path) {
   };
 }
 
+// Slot 0 is the main text color (single-line text, emojis, and logos); slot n + 1 is line n.
+function splitTextByLine(lineRings: Ring[][], textPaths: Paths, charmPaths: Paths, eyes: EyeBall[]) {
+  const filled = lineRings.filter((rings) => rings.length).length;
+  if (filled < 2) return [{ shapes: punchedTextShapes(textPaths, eyes), slot: 0 }];
+  const parts: TextPart[] = [];
+  let taken: Paths = [];
+  if (charmPaths.length) {
+    parts.push({ shapes: punchedTextShapes(charmPaths, eyes), slot: 0 });
+    taken = charmPaths;
+  }
+  lineRings.forEach((rings, line) => {
+    if (!rings.length) return;
+    let paths = clean(unionPaths(toClipper(rings)));
+    if (taken.length) paths = clean(ClipperLib.Clipper.PolyTreeToPaths(differencePaths(paths, taken)));
+    if (!paths.length) return;
+    parts.push({ shapes: pathsToShapes(paths), slot: line + 1 });
+    taken = clean(unionPaths([...taken, ...paths]));
+  });
+  return parts;
+}
+
 function punchedTextShapes(paths: Paths, eyes: EyeBall[]) {
   if (!eyes.length) return pathsToShapes(paths);
   const tree = differencePaths(
@@ -1180,7 +1234,7 @@ function pathsToTree(paths: Paths) {
   return tree;
 }
 
-function exPolygonsToShapes(tree: PolyTree, scale = SCALE) {
+function exPolygonsToShapes(tree: PolyTree, scale = SCALE, minHole = 0.4) {
   const polygons = ClipperLib.JS.PolyTreeToExPolygons(tree);
   const shapes: THREE.Shape[] = [];
   let holeCount = 0;
@@ -1190,7 +1244,7 @@ function exPolygonsToShapes(tree: PolyTree, scale = SCALE) {
     for (const hole of polygon.holes) {
       if (hole.length < 3) continue;
       const area = Math.abs(pathArea(hole)) / (scale * scale);
-      if (area < 0.4) continue;
+      if (area < minHole) continue;
       shape.holes.push(new THREE.Path(toVectors(hole, scale)));
       holeCount += 1;
     }
@@ -1215,6 +1269,33 @@ function extrude(shapes: THREE.Shape[], depth: number, curveSegments = 1) {
   return geometry;
 }
 
+export function hasLineColors(text: THREE.BufferGeometry) {
+  return text.userData.lineSlots === true;
+}
+
+export function textSlotColors(text: THREE.BufferGeometry, textColor: string, lineColors: string[] = []) {
+  if (!hasLineColors(text)) return [textColor];
+  const slots = Math.max(0, ...text.groups.map((group) => group.materialIndex ?? 0)) + 1;
+  return Array.from({ length: slots }, (_, slot) => (slot === 0 ? textColor : lineColors[slot - 1] || textColor));
+}
+
+function extrudeParts(parts: TextPart[], depth: number) {
+  if (parts.length === 1) return extrude(parts[0].shapes, depth);
+  const pieces = parts.map((part) => {
+    const piece = extrude(part.shapes, depth);
+    return piece.index ? piece.toNonIndexed() : piece;
+  });
+  const merged = mergeGeometries(pieces, true);
+  if (!merged) throw new Error("The text lines could not be combined.");
+  merged.groups.forEach((group, index) => {
+    group.materialIndex = parts[index].slot;
+  });
+  merged.userData.lineSlots = true;
+  for (const piece of pieces) piece.dispose();
+  merged.computeBoundingBox();
+  return merged;
+}
+
 export function extrudeShapes(shapes: THREE.Shape[], depth: number, curveSegments = 8) {
   if (!(depth > 0)) throw new Error("Thickness has to be greater than zero.");
   return extrude(shapes, depth, curveSegments);
@@ -1235,6 +1316,38 @@ export function cutShapes(subject: THREE.Shape[], cuts: THREE.Shape[], divisions
   );
   if (!ok) throw new Error("The recessed detail could not be cut.");
   return pathsToShapes(clean(ClipperLib.Clipper.PolyTreeToPaths(tree), 0.0002, scale), scale);
+}
+
+// Raised emoji with its drawn features cut in. Mark rings keep their own winding, so
+// shapes nested inside a hole (eyebrows inside a face) stay features. A rim keeps the
+// silhouette edge whole.
+export function emojiFace(body: Ring[], marks: Ring[], pupils: Ring[], rim: number) {
+  const bodyPaths = clean(unionPaths(toClipper(body)), 0.004);
+  if (!bodyPaths.length) return [];
+  const drawn = [...toClipper(marks), ...toClipper(pupils).map(asOuter)];
+  const features = drawn.length ? clean(unionPaths(drawn), 0.004) : [];
+  const inner = offsetPaths(bodyPaths, -rim, 0.01);
+  if (!features.length || !inner.length) return exPolygonsToShapes(pathsToTree(bodyPaths)).shapes;
+  const carved = ClipperLib.Clipper.PolyTreeToPaths(differencePaths(bodyPaths, features));
+  const band = ClipperLib.Clipper.PolyTreeToPaths(differencePaths(bodyPaths, inner));
+  const raised = clean(unionPaths([...carved, ...band]), 0.004);
+  const area = (paths: Paths) => paths.reduce((sum, path) => sum + pathArea(path), 0);
+  // Some emojis draw the whole figure as one dark fill; carving that leaves only the rim.
+  // Then raise the whole figure and cut its small openings instead: holes in the fill and
+  // light patches sitting inside it (a skull's eye sockets).
+  let tree = pathsToTree(raised);
+  const silhouette = clean(unionPaths([...bodyPaths, ...features]), 0.004);
+  const whole = area(silhouette);
+  if (area(raised) < 0.4 * whole) {
+    const small = (path: Path) => Math.abs(pathArea(path)) < 0.15 * whole;
+    const holes = features.filter((path) => pathArea(path) < 0 && small(path)).map(asOuter);
+    const patches = toClipper(body)
+      .map(asOuter)
+      .filter((path) => small(path) && area(ClipperLib.Clipper.PolyTreeToPaths(differencePaths([path], features))) < 0.2 * pathArea(path));
+    tree = differencePaths(silhouette, [...holes, ...patches]);
+  }
+  const shapes = exPolygonsToShapes(tree, SCALE, 0.05).shapes;
+  return shapes.filter((shape) => Math.abs(THREE.ShapeUtils.area(shape.getPoints())) > 0.05);
 }
 
 function shapeRings(shape: THREE.Shape, divisions: number) {

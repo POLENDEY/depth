@@ -1,12 +1,13 @@
 import type { Font } from "opentype.js";
 import * as THREE from "three";
 import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js";
-import { TAG_GROUPS, type ProductSettings, type TagShape } from "./catalog";
-import { charmLayers } from "./charms";
+import { TAG_GROUPS, type LoopStyle, type ProductSettings, type TagShape } from "./catalog";
+import { charmLayers, isLogo } from "./charms";
 import { decodeSpotifyBars, spotifyLogoLoops, type SpotifyPoint } from "./spotify-code";
 import { familiarParts, type TagPoint } from "./tag-shapes";
 import {
   cutShapes,
+  emojiFace,
   extrudeShapes,
   layoutText,
   outlinedMagnet,
@@ -37,6 +38,8 @@ export function buildProduct(
       return articulated(requiredFont(font), settings, quality, curve);
     case "flexi-keychain":
       return flexiKeychain(requiredFont(font), settings, quality);
+    case "clicker-keychain":
+      return clickerKeychain(requiredFont(font), settings, quality);
     case "pen-holder":
       return penHolder(requiredFont(font), settings, quality, curve);
     case "picture-frame":
@@ -706,7 +709,7 @@ function flexiKeychain(font: Font, settings: ProductSettings, quality: MeshQuali
     const icon =
       index < chars.length
         ? flexiLetter(font, chars[index], letterBox, size * 0.66, capDepth + FUSE, quality)
-        : flexiEmoji(icons[index - chars.length].id, size * 0.72, capDepth + FUSE);
+        : capIcon(icons[index - chars.length].id, size * 0.72, capDepth + FUSE);
     if (icon) {
       icon.translate(cx, 0, thickness - FUSE);
       caps.push(icon);
@@ -749,6 +752,297 @@ function flexiKeychain(font: Font, settings: ProductSettings, quality: MeshQuali
   return pack(fuse(caps), fuse(bodies), warnings);
 }
 
+// Cherry MX-compatible switch: 14 mm plate cutout in a 1.5 mm plate, about 8.3 mm of
+// body and pins below the plate top, and a 4 mm cross stem. Printed holes run small,
+// so the cutout and the cross get a little extra.
+export const CLICKER = {
+  unit: 23.5,
+  floor: 1.6,
+  below: 8,
+  cavity: 15.2,
+  plate: 1.5,
+  cutout: 14.1,
+  wall: 8,
+  pocket: 19.4,
+  cap: 18.4,
+  skirtWall: 1,
+  skirt: 5.5,
+  post: 2.75,
+  socket: 4,
+  crossLength: 4.2,
+  crossWidth: 1.35,
+  capHeight: 9,
+  capTop: 15.4,
+};
+
+function clickerKeychain(font: Font, settings: ProductSettings, quality: MeshQuality) {
+  const chars = Array.from(settings.text.normalize("NFC"))
+    .filter((char) => char.trim())
+    .slice(0, 8);
+  const icons = settings.charms.slice(0, Math.max(0, 8 - chars.length));
+  const keys = chars.length + icons.length;
+  if (!keys) throw new Error("Type a letter or add an emoji or logo.");
+  const letterSize = clamp(settings.letterHeight, 6, 13);
+  const letterDepth = clamp(settings.textThickness, 0.6, 1.6);
+  const holeRadius = clamp(settings.holeDiameter, 3, 6) / 2;
+  const fine = quality === "print" ? 40 : 20;
+  const corner = quality === "print" ? 10 : 6;
+  const k = CLICKER;
+  const length = keys * k.unit;
+  const centers = Array.from({ length: keys }, (_, index) => (index + 0.5) * k.unit);
+  const socketRow = (size: number, radius: number) => {
+    const shape = roundedRect(length, k.unit, 3);
+    for (const x of centers) {
+      const hole = roundedRect(size, size, radius);
+      shape.holes.push(new THREE.Path(hole.getPoints(corner).map((point) => new THREE.Vector2(point.x + x - length / 2, point.y))));
+    }
+    return shape;
+  };
+
+  const bodies: THREE.BufferGeometry[] = [];
+  const letters: THREE.BufferGeometry[] = [];
+  const layers: [THREE.Shape, number, number][] = [
+    [roundedRect(length, k.unit, 3), 0, k.floor],
+    [socketRow(k.cavity, 0.6), k.floor, k.below],
+    [socketRow(k.cutout, 0.3), k.floor + k.below, k.plate],
+    [socketRow(k.pocket, 1.8), k.floor + k.below + k.plate, k.wall],
+  ];
+  for (const [shape, z, depth] of layers) {
+    const layer = extrudeShapes([shape], depth, corner);
+    layer.translate(length / 2, 0, z);
+    bodies.push(layer);
+  }
+
+  const right = settings.loopSide === "right";
+  for (const part of clickerLoop(settings.loopStyle, holeRadius, right ? -1 : 1, fine)) {
+    if (right) part.rotateZ(Math.PI).translate(length, 0, 0);
+    bodies.push(part);
+  }
+
+  const capY = -(k.unit / 2 + 6 + k.cap / 2);
+  for (const [index, x] of centers.entries()) {
+    for (const part of keycap(fine, corner)) {
+      part.translate(x, capY, 0);
+      bodies.push(part);
+    }
+    const mark =
+      index < chars.length
+        ? flexiLetter(font, chars[index], k.capTop - 3, letterSize, letterDepth + FUSE, quality)
+        : capIcon(icons[index - chars.length].id, k.capTop - 3, letterDepth + FUSE);
+    if (mark) {
+      mark.translate(x, capY, k.capHeight - FUSE);
+      letters.push(mark);
+    }
+  }
+
+  const warnings = [
+    `Needs ${keys} Cherry MX-compatible switch${keys > 1 ? "es" : ""}, one per key. Print the housing upright and the keycaps standing on their open side, with no supports. Push each switch into a socket from the top until it clicks, then press a keycap onto each stem.`,
+  ];
+  if (letters.length < keys) warnings.push("One letter, emoji, or logo could not be drawn. Try another font or add it again.");
+  return pack(letters.length ? fuse(letters) : new THREE.BufferGeometry(), fuse(bodies), warnings);
+}
+
+// Keyring loop off the housing's left end (x = 0), lying flat on the bed. `back` is the
+// side away from the keycaps, so the corner loop stays clear of them once mirrored.
+function clickerLoop(style: LoopStyle, hole: number, back: number, fine: number) {
+  const depth = 5;
+  const solid = (shapes: THREE.Shape[]) => extrudeShapes(shapes, depth, fine);
+  const bore = (x: number, y: number) => {
+    const path = new THREE.Path();
+    path.absarc(x, y, hole, 0, Math.PI * 2, true);
+    return path;
+  };
+  const neck = (from: number, width: number) => {
+    const bar = solid([roundedRect(2 - from, width, 0.8)]);
+    return bar.translate((from + 2) / 2, 0, 0);
+  };
+  switch (style) {
+    case "none":
+      return [];
+    case "ring": {
+      const outer = hole + 2;
+      const center = -(hole + outer + 2);
+      return [solid([ring(outer, hole)]).translate(center, 0, 0), neck(center + hole + 0.6, 4)];
+    }
+    case "heart": {
+      const scale = (hole + 2.2) / 7;
+      const heart = new THREE.Shape();
+      for (let step = 0; step <= 96; step += 1) {
+        const t = (step / 96) * Math.PI * 2;
+        const x = 16 * Math.sin(t) ** 3 * scale;
+        const y = (13 * Math.cos(t) - 5 * Math.cos(2 * t) - 2 * Math.cos(3 * t) - Math.cos(4 * t)) * scale;
+        if (step === 0) heart.moveTo(x, y);
+        else heart.lineTo(x, y);
+      }
+      heart.holes.push(bore(0, -3 * scale));
+      // Tip toward the housing, sunk 3 mm into its end wall.
+      return [solid([heart]).rotateZ(Math.PI / 2).translate(3 - 17 * scale, 0, 0)];
+    }
+    case "star": {
+      const inner = hole + 2.2;
+      const outer = inner * 1.85;
+      const star = new THREE.Shape();
+      for (let point = 0; point < 10; point += 1) {
+        const angle = Math.PI + (point * Math.PI) / 5;
+        const radius = point % 2 ? inner : outer;
+        if (point === 0) star.moveTo(Math.cos(angle) * radius, Math.sin(angle) * radius);
+        else star.lineTo(Math.cos(angle) * radius, Math.sin(angle) * radius);
+      }
+      star.holes.push(bore(0, 0));
+      const center = -(outer * 0.8 + 1);
+      return [solid([star]).translate(center, 0, 0), neck(center + hole + 0.6, 4)];
+    }
+    case "corner": {
+      // Eye out past the back corner, its bar running diagonally into the corner.
+      const reach = hole + 6.5;
+      const cornerX = 3;
+      const cornerY = back * (CLICKER.unit / 2 - 3);
+      const tab = solid([noseBar(reach + 1, hole + 2.5, hole)]);
+      tab.rotateZ((back * 3 * Math.PI) / 4);
+      return [tab.translate(cornerX - reach * Math.SQRT1_2, cornerY + back * reach * Math.SQRT1_2, 0)];
+    }
+    default: {
+      const tab = solid([noseBar(hole + 4, hole + 2.5, hole)]);
+      return [tab.rotateZ(Math.PI).translate(-(hole + 2), 0, 0)];
+    }
+  }
+}
+
+// Logos raise their own marks (outlines or line art); emojis use the bead style.
+function capIcon(id: string, target: number, depth: number) {
+  if (!isLogo(id)) return flexiEmoji(id, target, depth);
+  const layers = charmLayers(id, 0, 0, 1);
+  if (!layers?.mark.length) return null;
+  const rings = layers.mark
+    .map((ring) => ring.points.map((point) => new THREE.Vector2(point.x, point.y)))
+    .filter((points) => points.length >= 3);
+  if (!rings.length) return null;
+  // Rings come as an outer outline followed by its holes, so the outer winding marks a new shape.
+  const outerSign = Math.sign(THREE.ShapeUtils.area(rings[0]));
+  const shapes: THREE.Shape[] = [];
+  for (const points of rings) {
+    if (Math.sign(THREE.ShapeUtils.area(points)) === outerSign) shapes.push(new THREE.Shape(points));
+    else shapes[shapes.length - 1]?.holes.push(new THREE.Path(points));
+  }
+  const mesh = extrudeShapes(shapes, depth, 1);
+  mesh.computeBoundingBox();
+  const box = mesh.boundingBox!;
+  const span = Math.max(box.max.x - box.min.x, box.max.y - box.min.y) || 1;
+  mesh.translate(-(box.min.x + box.max.x) / 2, -(box.min.y + box.max.y) / 2, 0);
+  mesh.scale(target / span, target / span, 1);
+  return mesh;
+}
+
+// Keycap standing on its open side: a skirt around the switch, a cross socket for the
+// stem, and a rounded top. The socket post reaches the bed, so nothing hangs in the air.
+function keycap(fine: number, corner: number) {
+  const k = CLICKER;
+  const half = k.cap / 2;
+  const radius = 2.4;
+  const bevel = (k.cap - k.capTop) / 2;
+  const steps = 8;
+  const outer: { z: number; inset: number }[] = [{ z: 0, inset: 0 }];
+  for (let step = 0; step <= steps; step += 1) {
+    const angle = (step / steps) * (Math.PI / 2);
+    outer.push({ z: k.capHeight - bevel + bevel * Math.sin(angle), inset: bevel * (1 - Math.cos(angle)) });
+  }
+  const ring = (inset: number, r: number, z: number) => squareRing(half - inset, Math.max(0.3, r - inset), corner, z);
+  const shell = outer.map((level) => ring(level.inset, radius, level.z));
+  const innerHalf = half - k.skirtWall;
+  const innerBottom = squareRing(innerHalf, 1.4, corner, 0);
+  const innerTop = squareRing(innerHalf, 1.4, corner, k.socket);
+
+  const parts = [
+    loft(shell, false),
+    loft([innerBottom, innerTop], true),
+    capFace(shell[shell.length - 1], 1),
+    capFace(innerTop, -1),
+    bandFace(shell[0], innerBottom),
+  ];
+
+  const post = disk(k.post);
+  post.holes.push(crossPath(k.crossLength, k.crossWidth));
+  parts.push(extrudeShapes([post], k.socket + 0.3, fine));
+  return parts;
+}
+
+// Rounded square ring, counterclockwise, with the same point count for any size.
+function squareRing(half: number, radius: number, corner: number, z: number) {
+  const points: THREE.Vector3[] = [];
+  const centers = [
+    [half - radius, half - radius],
+    [-(half - radius), half - radius],
+    [-(half - radius), -(half - radius)],
+    [half - radius, -(half - radius)],
+  ];
+  centers.forEach(([cx, cy], index) => {
+    for (let step = 0; step <= corner; step += 1) {
+      const angle = (index + step / corner) * (Math.PI / 2);
+      points.push(new THREE.Vector3(cx + Math.cos(angle) * radius, cy + Math.sin(angle) * radius, z));
+    }
+  });
+  return points;
+}
+
+function surface(positions: number[], indices: number[]) {
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+  geometry.setAttribute("uv", new THREE.Float32BufferAttribute(new Array((positions.length / 3) * 2).fill(0), 2));
+  geometry.setIndex(indices);
+  geometry.computeVertexNormals();
+  return geometry;
+}
+
+// Side wall through a stack of rings. Shared vertices keep the rounded edge smooth.
+function loft(rings: THREE.Vector3[][], inward: boolean) {
+  const count = rings[0].length;
+  const positions = rings.flatMap((points) => points.flatMap((point) => [point.x, point.y, point.z]));
+  const indices: number[] = [];
+  for (let level = 0; level < rings.length - 1; level += 1) {
+    for (let index = 0; index < count; index += 1) {
+      const a = level * count + index;
+      const b = level * count + ((index + 1) % count);
+      const c = b + count;
+      const d = a + count;
+      indices.push(...(inward ? [a, c, b, a, d, c] : [a, b, c, a, c, d]));
+    }
+  }
+  return surface(positions, indices);
+}
+
+function capFace(points: THREE.Vector3[], facing: 1 | -1) {
+  const contour = points.map((point) => new THREE.Vector2(point.x, point.y));
+  const triangles = THREE.ShapeUtils.triangulateShape(contour, []);
+  const indices = triangles.flatMap(([a, b, c]) => {
+    const [p, q, r] = [contour[a], contour[b], contour[c]];
+    const up = (q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x) > 0;
+    return up === (facing === 1) ? [a, b, c] : [a, c, b];
+  });
+  return surface(points.flatMap((point) => [point.x, point.y, point.z]), indices);
+}
+
+// Flat ring between two matching rings at the same height, facing down.
+function bandFace(outer: THREE.Vector3[], inner: THREE.Vector3[]) {
+  const count = outer.length;
+  const positions = [...outer, ...inner].flatMap((point) => [point.x, point.y, point.z]);
+  const indices: number[] = [];
+  for (let index = 0; index < count; index += 1) {
+    const next = (index + 1) % count;
+    indices.push(index, count + next, next, index, count + index, count + next);
+  }
+  return surface(positions, indices);
+}
+
+function crossPath(length: number, width: number) {
+  const l = length / 2;
+  const w = width / 2;
+  const points = [
+    [w, l], [w, w], [l, w], [l, -w], [w, -w], [w, -l],
+    [-w, -l], [-w, -w], [-l, -w], [-l, w], [-w, w], [-w, l],
+  ];
+  return new THREE.Path(points.map(([x, y]) => new THREE.Vector2(x, y)));
+}
+
 // A bar from x = -length to 0, ending in a half-round nose of radius `radius` centered at 0.
 function noseBar(length: number, radius: number, bore?: number) {
   const shape = new THREE.Shape();
@@ -782,21 +1076,14 @@ function flexiLetter(font: Font, char: string, maxWidth: number, capHeight: numb
 }
 
 function flexiEmoji(id: string, target: number, depth: number) {
-  const layers = charmLayers(id, 0, 0, 1);
+  // Cut at full size: tiny holes are dropped when cut shapes are rebuilt.
+  const layers = charmLayers(id, 0, 0, target);
   if (!layers) return null;
-  const toShape = (ring: { points: { x: number; y: number }[] }) =>
-    new THREE.Shape(ring.points.map((point) => new THREE.Vector2(point.x, point.y)));
-  const area = (ring: { points: { x: number; y: number }[] }) => Math.abs(THREE.ShapeUtils.area(ring.points.map((point) => new THREE.Vector2(point.x, point.y))));
-  const solids = (layers.body.length ? layers.body : layers.mark).filter((ring) => ring.points.length >= 3);
-  if (!solids.length) return null;
-  const largest = Math.max(...solids.map(area));
-  const details = layers.body.length
-    ? [...layers.mark, ...layers.pupil].filter((ring) => {
-        const share = area(ring) / largest;
-        return ring.points.length >= 3 && share > 0.004 && share < 0.45;
-      })
-    : [];
-  const shapes = cutShapes(solids.map(toShape), details.map(toShape), 48);
+  const rings = (list: { points: { x: number; y: number }[] }[]) =>
+    list.map((ring) => ring.points).filter((points) => points.length >= 3);
+  const shapes = layers.body.length
+    ? emojiFace(rings(layers.body), rings(layers.mark), rings(layers.pupil), Math.max(0.35, target * 0.04))
+    : rings(layers.mark).map((points) => new THREE.Shape(points.map((point) => new THREE.Vector2(point.x, point.y))));
   if (!shapes.length) return null;
   const mesh = extrudeShapes(shapes, depth, 1);
   mesh.computeBoundingBox();

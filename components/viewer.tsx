@@ -3,7 +3,7 @@
 import { useEffect, useRef } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
-import { LIMITS, type CharmBox, type CharmPlacement, type KeychainModel } from "@/lib/geometry";
+import { hasLineColors, LIMITS, textSlotColors, type CharmBox, type CharmPlacement, type KeychainModel } from "@/lib/geometry";
 
 type ViewerApi = {
   textMesh: THREE.Mesh;
@@ -19,6 +19,7 @@ type ViewerProps = {
   model: KeychainModel | null;
   textColor: string;
   baseColor: string;
+  lineColors?: string[];
   charms?: CharmPlacement[];
   onCharmMove?: (index: number, x: number, y: number) => void;
   holeX?: number;
@@ -42,6 +43,7 @@ export function Viewer({
   model,
   textColor,
   baseColor,
+  lineColors,
   charms = [],
   onCharmMove,
   holeX = 0,
@@ -52,6 +54,7 @@ export function Viewer({
 }: ViewerProps) {
   const hostRef = useRef<HTMLDivElement>(null);
   const apiRef = useRef<ViewerApi | null>(null);
+  const lineMatsRef = useRef<THREE.MeshStandardMaterial[]>([]);
   const dragRef = useRef<DragInfo>({
     charmBounds: [],
     charms: [],
@@ -372,12 +375,29 @@ export function Viewer({
     api.frame(false);
   }, [model, showDimensions]);
 
+  const lineColorKey = (lineColors ?? []).join(",");
   useEffect(() => {
     const api = apiRef.current;
     if (!api) return;
     api.textMat.color.set(textColor);
     api.baseMat.color.set(baseColor);
-  }, [textColor, baseColor]);
+    const extra = lineMatsRef.current;
+    if (!model || !hasLineColors(model.text)) {
+      api.textMesh.material = api.textMat;
+      return;
+    }
+    const colors = textSlotColors(model.text, textColor, lineColorKey ? lineColorKey.split(",") : []);
+    while (extra.length < colors.length - 1) extra.push(api.textMat.clone());
+    colors.slice(1).forEach((color, index) => extra[index].color.set(color));
+    api.textMesh.material = [api.textMat, ...extra.slice(0, colors.length - 1)];
+  }, [model, textColor, baseColor, lineColorKey]);
+
+  useEffect(() => {
+    const extra = lineMatsRef.current;
+    return () => {
+      for (const material of extra) material.dispose();
+    };
+  }, []);
 
   return (
     <>

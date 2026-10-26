@@ -7,8 +7,17 @@ import { downloadBlob, EXPORT_FORMATS, exportKeychain, slugify, type ExportForma
 import { FontField } from "@/components/font-field";
 import { useFontLibrary } from "@/lib/font-library";
 import { CharmPicker, CharmStrip } from "@/components/charm-picker";
-import { ensureCharmArt } from "@/lib/charms";
-import { importLogo } from "@/lib/logo";
+import { ensureCharmArt, isLogo } from "@/lib/charms";
+import {
+  emojiLineArt,
+  importLogo,
+  LOGO_EDGES,
+  LOGO_TRACES,
+  logoSource,
+  reconvertLogo,
+  type LogoEdges,
+  type LogoTrace,
+} from "@/lib/logo";
 import { buildKeychain, LIMITS, MAX_CHARMS, withCharm, type HoleSide, type KeychainModel, type KeychainParams } from "@/lib/geometry";
 import { formatSize, fromDisplay, toDisplay, type Unit } from "@/lib/units";
 import { UndoRedoControls } from "@/components/undo-redo-controls";
@@ -17,6 +26,7 @@ import { useUndoRedo } from "@/components/use-undo-redo";
 type Settings = KeychainParams & {
   fontId: string;
   textColor: string;
+  lineColors: string[];
   baseColor: string;
 };
 
@@ -37,6 +47,7 @@ const INITIAL: Settings = {
   charms: [],
   charmBase: 1.2,
   textColor: "#f4f4f5",
+  lineColors: [],
   baseColor: "#8b78f2",
 };
 
@@ -61,6 +72,7 @@ export function Studio() {
   const [showDimensions, setShowDimensions] = useState(false);
   const [importingLogo, setImportingLogo] = useState(false);
   const fonts = useFontLibrary();
+  const hasContent = Boolean(settings.text.trim() || settings.charms.length);
 
   const geometryKey = useMemo(
     () =>
@@ -96,7 +108,7 @@ export function Studio() {
     const params = JSON.parse(geometryKey) as KeychainParams & { fontId: string };
     let cancel = false;
     const timer = window.setTimeout(() => {
-      if (!params.text.trim()) {
+      if (!params.text.trim() && !params.charms.length) {
         if (!cancel) {
           setError(null);
           setBuilding(false);
@@ -134,7 +146,7 @@ export function Studio() {
   }, [geometryKey, fonts.load]);
 
   async function onDownload() {
-    if (!settings.text.trim()) return;
+    if (!hasContent) return;
     setExporting(true);
     try {
       const font = await fonts.load(settings.fontId);
@@ -147,6 +159,8 @@ export function Studio() {
           settings.textColor,
           settings.baseColor,
           slugify(settings.text),
+          "keychain",
+          settings.lineColors,
         );
         downloadBlob(file.blob, file.filename);
       } finally {
@@ -202,8 +216,40 @@ export function Studio() {
     }
   }
 
+  const selectedIndex = Math.min(selectedCharm, settings.charms.length - 1);
+  const selectedId = settings.charms[selectedIndex]?.id ?? "";
+  const selectedSource = selectedId ? logoSource(selectedId) : null;
+  const selectedEmoji = selectedId && !isLogo(selectedId) ? selectedId : (selectedSource?.emoji ?? null);
+  const raise = selectedSource ? selectedSource.trace : selectedEmoji ? "emoji" : null;
+  const raiseOptions = selectedEmoji
+    ? [
+        { value: "emoji", label: "Emoji style" },
+        { value: "lines", label: "Line art only" },
+      ]
+    : LOGO_TRACES;
+
+  async function onLogoOptions(options: { edges?: LogoEdges; trace?: LogoTrace | "emoji" }) {
+    if (!selectedId) return;
+    setImportingLogo(true);
+    try {
+      let id: string;
+      if (options.trace === "emoji") id = selectedEmoji ?? selectedId;
+      else if (!selectedSource && selectedEmoji) id = await emojiLineArt(selectedEmoji);
+      else id = await reconvertLogo(selectedId, options as { edges?: LogoEdges; trace?: LogoTrace });
+      setSettings((current) => ({
+        ...current,
+        charms: current.charms.map((charm) => (charm.id === selectedId ? { ...charm, id } : charm)),
+      }));
+      setError(null);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not convert that logo.");
+    } finally {
+      setImportingLogo(false);
+    }
+  }
+
   const lines = settings.text.replace(/\r\n?/g, "\n").split("\n");
-  const visibleModel = settings.text.trim() ? model : null;
+  const visibleModel = hasContent ? model : null;
   const unitStep = unit === "mm" ? 0.1 : 0.01;
   const sizeLabel = visibleModel
     ? formatSize(visibleModel.width, visibleModel.height, visibleModel.depth, "mm")
@@ -220,6 +266,7 @@ export function Studio() {
             model={visibleModel}
             textColor={settings.textColor}
             baseColor={settings.baseColor}
+            lineColors={settings.lineColors}
             charms={settings.charms}
             onCharmMove={
               settings.charms.length
@@ -278,7 +325,7 @@ export function Studio() {
               <button
                 type="button"
                 onClick={() => void onDownload()}
-                disabled={exporting || !settings.text.trim()}
+                disabled={exporting || !hasContent}
                 className="inline-flex h-10 items-center gap-2 rounded-lg bg-[#2f80ed] px-4 text-sm font-medium text-white shadow-sm hover:bg-[#1f6fd6] disabled:cursor-wait disabled:opacity-70"
               >
                 <DownloadIcon />
@@ -301,7 +348,7 @@ export function Studio() {
           <p className="border-t border-[#f0f1f4] px-4 py-2 text-xs text-amber-700">{visibleModel.warnings[0]}</p>
         ) : (
           <p className="border-t border-[#f0f1f4] px-4 py-2 text-xs text-zinc-400">
-            STL, OBJ, and 3MF are millimeters, lying flat for the print bed. 3MF and GLB keep the two colors.
+            STL, OBJ, and 3MF are millimeters, lying flat for the print bed. 3MF and GLB keep every color, including each line color.
           </p>
         )}
       </section>
@@ -461,10 +508,23 @@ export function Studio() {
 
         {lines.length > 1 ? (
           <div className="mt-2 grid gap-1.5 rounded-xl border border-[#eceef2] bg-[#fafafa] p-3">
-            <p className="text-[11px] font-semibold tracking-[0.14em] text-zinc-400">LINE SIZES</p>
+            <p className="text-[11px] font-semibold tracking-[0.14em] text-zinc-400">LINES</p>
             {lines.map((line, index) => (
-              <label key={index} className="flex items-center gap-2 text-sm text-zinc-600">
-                <span className="w-16 shrink-0">{index === 0 ? "Top" : index === lines.length - 1 ? "Bottom" : `Line ${index + 1}`}</span>
+              <div key={index} className="flex items-center gap-2 text-sm text-zinc-600">
+                <span className="w-14 shrink-0">{index === 0 ? "Top" : index === lines.length - 1 ? "Bottom" : `Line ${index + 1}`}</span>
+                <input
+                  type="color"
+                  aria-label={`Color of line ${index + 1}`}
+                  value={settings.lineColors[index] || settings.textColor}
+                  onChange={(event) =>
+                    patch({
+                      lineColors: lines.map((_, lineIndex) =>
+                        lineIndex === index ? event.target.value : settings.lineColors[lineIndex] || "",
+                      ),
+                    })
+                  }
+                  className="color-swatch shrink-0"
+                />
                 <span className="min-w-0 flex-1 truncate text-xs text-zinc-400">{line.trim() || "(empty)"}</span>
                 <input
                   type="number"
@@ -486,9 +546,9 @@ export function Studio() {
                   className="h-9 w-20 rounded-lg border border-[#e6e7ec] bg-white px-2 text-sm tabular-nums"
                 />
                 <span className="w-6 text-xs text-zinc-400">{unit}</span>
-              </label>
+              </div>
             ))}
-            <p className="text-xs text-zinc-400">Change one line without touching the others. Size above resets every line.</p>
+            <p className="text-xs text-zinc-400">Set the color and letter height of each line on its own. Size above resets the height of every line. Emojis and logos keep the Text color.</p>
           </div>
         ) : null}
 
@@ -513,6 +573,48 @@ export function Studio() {
           <p className="mt-1 text-xs text-zinc-400">
             The logo becomes raised 3D in the text color, on the base. Drag it in the preview, and set its size below.
           </p>
+          {raise ? (
+            <>
+              <label className="mt-2 flex items-center gap-2 text-sm text-zinc-600">
+                <span className="w-12">Raise</span>
+                <select
+                  aria-label="Raise"
+                  value={raise}
+                  disabled={importingLogo}
+                  onChange={(event) => void onLogoOptions({ trace: event.target.value as LogoTrace | "emoji" })}
+                  className="h-9 flex-1 rounded-lg border border-[#e6e7ec] bg-white px-2 text-sm"
+                >
+                  {raiseOptions.map((entry) => (
+                    <option key={entry.value} value={entry.value}>
+                      {entry.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              {selectedSource ? (
+                <label className="mt-2 flex items-center gap-2 text-sm text-zinc-600">
+                  <span className="w-12">Edges</span>
+                  <select
+                    aria-label="Edges"
+                    value={selectedSource.edges}
+                    disabled={importingLogo}
+                    onChange={(event) => void onLogoOptions({ edges: event.target.value as LogoEdges })}
+                    className="h-9 flex-1 rounded-lg border border-[#e6e7ec] bg-white px-2 text-sm"
+                  >
+                    {LOGO_EDGES.map((entry) => (
+                      <option key={entry.value} value={entry.value}>
+                        {entry.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              ) : null}
+              <p className="mt-1 text-xs text-zinc-400">
+                For the selected emoji or logo. Line art only raises just the drawn black lines and ignores color fills;
+                the base follows the whole drawing. Smooth turns pixel stair steps into clean curves.
+              </p>
+            </>
+          ) : null}
         </Field>
 
         {settings.charms.length ? (

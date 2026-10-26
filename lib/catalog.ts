@@ -5,6 +5,17 @@ export type Pattern = "vertical" | "square" | "smooth";
 export type Relief = "embossed" | "debossed";
 export type TextFlow = "vertical" | "horizontal";
 export type LinkStyle = "tile" | "block";
+export type LoopStyle = "tab" | "ring" | "heart" | "star" | "corner" | "none";
+export type LoopSide = "left" | "right";
+
+export const LOOP_STYLES: { value: LoopStyle; label: string }[] = [
+  { value: "tab", label: "Rounded tab" },
+  { value: "ring", label: "Round ring" },
+  { value: "heart", label: "Heart" },
+  { value: "star", label: "Star" },
+  { value: "corner", label: "Corner loop" },
+  { value: "none", label: "No hole" },
+];
 
 export const TAG_GROUPS = [
   {
@@ -79,6 +90,8 @@ export type ProductSettings = {
   linkSize: number;
   letterGap: number;
   linkStyle: LinkStyle;
+  loopStyle: LoopStyle;
+  loopSide: LoopSide;
   charms: CharmPlacement[];
   charmBase: number;
   tagSize: number;
@@ -101,6 +114,7 @@ export type Field =
   | { type: "relief"; label: string }
   | { type: "text-flow"; label: string }
   | { type: "link-style"; label: string }
+  | { type: "loop-style"; label: string }
   | { type: "charm" }
   | { type: "colors"; text: string; base: string };
 
@@ -133,6 +147,8 @@ const shared = {
   linkSize: 6,
   letterGap: 0,
   linkStyle: "tile" as LinkStyle,
+  loopStyle: "tab" as LoopStyle,
+  loopSide: "left" as LoopSide,
   charms: [] as CharmPlacement[],
   charmBase: 1.2,
   tagSize: 48,
@@ -308,6 +324,33 @@ export const PRODUCTS: Product[] = [
       { type: "number", key: "textThickness", label: "Letter thickness", min: 0.8, max: 2.4, step: 0.1 },
       { type: "number", key: "holeDiameter", label: "Ring hole", min: 3, max: 6, step: 0.5 },
       { type: "colors", text: "Letters", base: "Beads" },
+    ],
+  },
+  {
+    slug: "clicker-keychain",
+    title: "Clicker Fidget",
+    summary: "A mechanical-switch fidget clicker with one key per letter, custom letter keycaps, and a keyring loop.",
+    button: "#ff8f7d",
+    settings: {
+      ...shared,
+      text: "HI",
+      fontId: "lilita-one",
+      textColor: "#ffffff",
+      baseColor: "#f05a28",
+      letterHeight: 10,
+      textThickness: 1,
+      baseThickness: 19.1,
+      holeDiameter: 5,
+    },
+    fields: [
+      { type: "text", label: "Letters", maxChars: 8 },
+      { type: "font" },
+      { type: "charm" },
+      { type: "number", key: "letterHeight", label: "Letter size", min: 6, max: 13, step: 0.5 },
+      { type: "number", key: "textThickness", label: "Letter thickness", min: 0.6, max: 1.6, step: 0.1 },
+      { type: "loop-style", label: "Keyring hole" },
+      { type: "number", key: "holeDiameter", label: "Ring hole", min: 3, max: 6, step: 0.5 },
+      { type: "colors", text: "Letters", base: "Housing & caps" },
     ],
   },
   {

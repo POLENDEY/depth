@@ -7,6 +7,7 @@ export function ProductArt({ slug }: { slug: string }) {
   if (slug === "cable-tag") return <CableArt />;
   if (slug === "articulated-name") return <ArticulatedArt />;
   if (slug === "flexi-keychain") return <FlexiArt />;
+  if (slug === "clicker-keychain") return <ClickerArt />;
   if (slug === "pen-holder") return <PenArt />;
   if (slug === "picture-frame") return <FrameArt />;
   if (slug === "nameplate") return <PlateArt />;
@@ -70,6 +71,29 @@ function FlexiArt() {
             {index < letters.length - 1 ? <rect x={x + 40} y="111" width="26" height="18" rx="9" fill="#d94a1c" /> : null}
             <rect x={x} y="96" width="46" height="46" rx="12" fill="#f05a28" />
             <text x={x + 23} y="132" textAnchor="middle" fill="#f8fafc" fontFamily="Lilita One, sans-serif" fontSize="34">
+              {letter}
+            </text>
+          </g>
+        );
+      })}
+    </Scene>
+  );
+}
+
+function ClickerArt() {
+  const letters = ["H", "I"];
+  return (
+    <Scene id="clicker" from="#eef0f3" to="#dfe3e8">
+      <circle cx="74" cy="120" r="16" fill="none" stroke="#9ca3af" strokeWidth="4" />
+      <rect x="82" y="110" width="26" height="20" rx="10" fill="#d94a1c" />
+      <rect x="98" y="62" width="172" height="116" rx="14" fill="#f05a28" />
+      {letters.map((letter, index) => {
+        const x = 110 + index * 82;
+        return (
+          <g key={letter}>
+            <rect x={x} y="74" width="66" height="92" rx="10" fill="#c2410c" />
+            <rect x={x + 7} y="82" width="52" height="76" rx="12" fill="#fb7a45" />
+            <text x={x + 33} y="134" textAnchor="middle" fill="#ffffff" fontFamily="Lilita One, sans-serif" fontSize="40">
               {letter}
             </text>
           </g>

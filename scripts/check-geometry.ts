@@ -21,10 +21,10 @@ class NodeFileReader {
 globalThis.FileReader = NodeFileReader as unknown as typeof FileReader;
 import opentype from "opentype.js";
 import { unzipSync } from "fflate";
-import { PRODUCTS } from "../lib/catalog";
+import { LOOP_STYLES, PRODUCTS } from "../lib/catalog";
 import { buildKeychain } from "../lib/geometry";
 import { exportKeychain } from "../lib/export";
-import { assertArticulatedHingeRound, assertBlockChain, buildProduct, flexiMetrics } from "../lib/models";
+import { assertArticulatedHingeRound, assertBlockChain, buildProduct, CLICKER, flexiMetrics } from "../lib/models";
 
 const defaults = {
   text: "PAUL",
@@ -138,6 +138,7 @@ async function main() {
   assertArticulatedHingeRound();
   assertBlockChain();
   assertFlexi();
+  assertClicker();
 
   model.text.dispose();
   model.base.dispose();
@@ -178,6 +179,49 @@ function assertFlexi() {
   for (const built of [one, four]) {
     built.text.dispose();
     built.base.dispose();
+  }
+}
+
+// MX switch: 14 mm cutout, 15.6 mm top housing at the plate, 8.3 mm of body and pins below
+// the plate top, 6.6 mm of housing above it, 4 mm of travel.
+function assertClicker() {
+  const k = CLICKER;
+  if (k.cutout < 14 || k.cutout > 14.3) throw new Error("Clicker switch cutout is not 14 mm");
+  if (k.pocket - k.cap < 0.6) throw new Error("Clicker keycap rubs the pocket wall");
+  if (k.cap - k.skirtWall * 2 < 15.6 + 0.6) throw new Error("Clicker keycap skirt hits the switch housing");
+  if (k.below + k.plate < 8.3 + 0.8) throw new Error("Clicker cavity is too shallow for the switch pins");
+  if (k.cavity - k.cutout < 0.8) throw new Error("Clicker cavity leaves no room for the switch clips");
+  if ((k.unit - k.pocket) / 2 < 1.6) throw new Error("Clicker housing walls are too thin");
+  if (6.6 + k.capHeight - k.wall < 4 + 1) throw new Error("Clicker keycap sinks below the wall when pressed");
+  if (k.crossLength < 4.05 || k.crossWidth < 1.2) throw new Error("Clicker cross socket is too tight");
+
+  const product = PRODUCTS.find((entry) => entry.slug === "clicker-keychain");
+  if (!product) throw new Error("Clicker is missing from the catalog");
+  const lilita = parseFont("public/fonts/lilita-one.ttf");
+  const one = buildProduct("clicker-keychain", lilita, { ...product.settings, text: "A" }, "preview");
+  const three = buildProduct("clicker-keychain", lilita, { ...product.settings, text: "ABC" }, "preview");
+  if (Math.abs(three.width - one.width - k.unit * 2) > 0.05) throw new Error("Clicker does not add one socket per letter");
+  const height = k.floor + k.below + k.plate + k.wall;
+  if (Math.abs(three.depth - height) > 0.05) throw new Error(`Clicker housing is ${three.depth.toFixed(2)} mm tall`);
+  three.text.computeBoundingBox();
+  const letters = three.text.boundingBox!;
+  if (letters.min.z < k.capHeight - 0.3 || letters.max.z < k.capHeight + 0.5) {
+    throw new Error("Clicker letters are not on the keycap tops");
+  }
+  for (const built of [one, three]) {
+    built.text.dispose();
+    built.base.dispose();
+  }
+  for (const loopStyle of LOOP_STYLES.map((style) => style.value)) {
+    for (const loopSide of ["left", "right"] as const) {
+      const built = buildProduct("clicker-keychain", lilita, { ...product.settings, text: "A", loopStyle, loopSide }, "preview");
+      const extra = built.width - k.unit;
+      if (loopStyle === "none" ? Math.abs(extra) > 0.05 : extra < 6 || extra > 25) {
+        throw new Error(`Clicker ${loopStyle} loop on the ${loopSide} sticks out ${extra.toFixed(1)} mm`);
+      }
+      built.text.dispose();
+      built.base.dispose();
+    }
   }
 }
 

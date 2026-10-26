@@ -6,10 +6,19 @@ import { ensureCharmArt } from "@/lib/charms";
 import { FontField } from "@/components/font-field";
 import { Viewer } from "@/components/viewer";
 import { CostEstimate } from "@/components/cost-estimate";
-import { productBySlug, TAG_GROUPS, type ProductSettings, type TagShape } from "@/lib/catalog";
+import { LOOP_STYLES, productBySlug, TAG_GROUPS, type ProductSettings, type TagShape } from "@/lib/catalog";
 import { downloadBlob, EXPORT_FORMATS, exportKeychain, slugify, type ExportFormat } from "@/lib/export";
 import { useFontLibrary } from "@/lib/font-library";
 import { LIMITS, MAX_CHARMS, withCharm, type KeychainModel } from "@/lib/geometry";
+import {
+  importLogo,
+  LOGO_EDGES,
+  LOGO_TRACES,
+  logoSource,
+  reconvertLogo,
+  type LogoEdges,
+  type LogoTrace,
+} from "@/lib/logo";
 import { buildProduct } from "@/lib/models";
 import { encodeSpotifyBars, fetchSpotifyBars } from "@/lib/spotify-code";
 import { formatSize, fromDisplay, toDisplay, type Unit } from "@/lib/units";
@@ -29,6 +38,7 @@ export function MakerStudio({ slug }: { slug: string }) {
   const [exporting, setExporting] = useState(false);
   const [generating, setGenerating] = useState(false);
   const [selectedCharm, setSelectedCharm] = useState(0);
+  const [importingLogo, setImportingLogo] = useState(false);
   const [showDimensions, setShowDimensions] = useState(false);
   const [spotifyNotice, setSpotifyNotice] = useState<{ tone: "ready" | "error"; text: string } | null>(null);
   const fonts = useFontLibrary();
@@ -52,7 +62,7 @@ export function MakerStudio({ slug }: { slug: string }) {
     let cancel = false;
     const attempt = spotifyAttempt.current;
     const timer = window.setTimeout(() => {
-      if (needsText && !current.text.trim()) {
+      if (needsText && !current.text.trim() && !current.charms.length) {
         if (!cancel) {
           setError(null);
           setBuilding(false);
@@ -94,6 +104,46 @@ export function MakerStudio({ slug }: { slug: string }) {
     setSettings((previous) => (previous ? { ...previous, ...partial } : previous));
   }
 
+  const selectedId = current.charms[Math.min(selectedCharm, current.charms.length - 1)]?.id ?? "";
+  const selectedSource = selectedId ? logoSource(selectedId) : null;
+
+  async function onImportLogo(file: File) {
+    setImportingLogo(true);
+    try {
+      const id = await importLogo(file);
+      const next = withCharm(current.charms, id, 40);
+      if (next.length === current.charms.length) {
+        setError(`You can add up to ${MAX_CHARMS} emojis and logos.`);
+        return;
+      }
+      setSelectedCharm(next.length - 1);
+      patch({ charms: next });
+      setError(null);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not convert that logo.");
+    } finally {
+      setImportingLogo(false);
+    }
+  }
+
+  async function onLogoOptions(options: { edges?: LogoEdges; trace?: LogoTrace }) {
+    if (!selectedId) return;
+    setImportingLogo(true);
+    try {
+      const id = await reconvertLogo(selectedId, options);
+      setSettings((previous) =>
+        previous
+          ? { ...previous, charms: previous.charms.map((charm) => (charm.id === selectedId ? { ...charm, id } : charm)) }
+          : previous,
+      );
+      setError(null);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not convert that logo.");
+    } finally {
+      setImportingLogo(false);
+    }
+  }
+
   async function onGenerateSpotify() {
     const link = settings?.text.trim() ?? "";
     if (!link) return;
@@ -115,7 +165,7 @@ export function MakerStudio({ slug }: { slug: string }) {
   }
 
   async function onDownload() {
-    if (needsText && !current.text.trim()) return;
+    if (needsText && !current.text.trim() && !current.charms.length) return;
     setExporting(true);
     try {
       const font = needsFont ? await fonts.load(current.fontId) : null;
@@ -160,7 +210,7 @@ export function MakerStudio({ slug }: { slug: string }) {
     if (current.fontId === id) patch({ fontId: "luckiest-guy" });
   }
 
-  const visible = !needsText || settings.text.trim() ? model : null;
+  const visible = !needsText || settings.text.trim() || settings.charms.length ? model : null;
   const sizeLabel = visible ? formatSize(visible.width, visible.height, visible.depth, unit) : "— × — × —";
   const sizeOther = visible ? formatSize(visible.width, visible.height, visible.depth, unit === "mm" ? "in" : "mm") : null;
 
@@ -225,7 +275,7 @@ export function MakerStudio({ slug }: { slug: string }) {
               <button
                 type="button"
                 onClick={() => void onDownload()}
-                disabled={exporting || (needsText && !settings.text.trim())}
+                disabled={exporting || (needsText && !settings.text.trim() && !settings.charms.length)}
                 className="inline-flex h-10 items-center gap-2 rounded-lg bg-[#2f80ed] px-4 text-sm font-medium text-white shadow-sm hover:bg-[#1f6fd6] disabled:cursor-wait disabled:opacity-70"
               >
                 {exporting ? "Preparing…" : `Download ${format.toUpperCase()}`}
@@ -343,6 +393,38 @@ export function MakerStudio({ slug }: { slug: string }) {
               </label>
             );
           }
+          if (field.type === "loop-style") {
+            return (
+              <div key="loop-style" className="mb-3 text-sm text-zinc-600">
+                <label htmlFor={`${slug}-loop-style`}>{field.label}</label>
+                <div className="mt-1 flex gap-2">
+                  <select
+                    id={`${slug}-loop-style`}
+                    value={settings.loopStyle}
+                    onChange={(event) => patch({ loopStyle: event.target.value as ProductSettings["loopStyle"] })}
+                    className="h-10 min-w-0 flex-1 rounded-lg border border-[#e6e7ec] bg-[#fafafa] px-2 text-sm"
+                  >
+                    {LOOP_STYLES.map((style) => (
+                      <option key={style.value} value={style.value}>
+                        {style.label}
+                      </option>
+                    ))}
+                  </select>
+                  {settings.loopStyle !== "none" && (
+                    <select
+                      aria-label="Hole side"
+                      value={settings.loopSide}
+                      onChange={(event) => patch({ loopSide: event.target.value as ProductSettings["loopSide"] })}
+                      className="h-10 w-28 rounded-lg border border-[#e6e7ec] bg-[#fafafa] px-2 text-sm"
+                    >
+                      <option value="left">Left end</option>
+                      <option value="right">Right end</option>
+                    </select>
+                  )}
+                </div>
+              </div>
+            );
+          }
           if (field.type === "text-flow") {
             return (
               <label key="text-flow" className="mb-3 block text-sm text-zinc-600" htmlFor={`${slug}-text-flow`}>
@@ -428,10 +510,67 @@ export function MakerStudio({ slug }: { slug: string }) {
                     patch({ charms: next });
                   }}
                 />
-                {slug === "flexi-keychain" ? (
-                  <p className="mt-1 text-xs text-zinc-400">
-                    Each emoji gets its own bead after the letters, the same size as the others.
-                  </p>
+                {slug === "flexi-keychain" || slug === "clicker-keychain" ? (
+                  <>
+                    <input
+                      id={`${slug}-logo-file`}
+                      type="file"
+                      accept=".svg,.png,image/svg+xml,image/png"
+                      className="sr-only"
+                      onChange={(event) => {
+                        const file = event.target.files?.[0];
+                        event.target.value = "";
+                        if (file) void onImportLogo(file);
+                      }}
+                    />
+                    <label
+                      htmlFor={`${slug}-logo-file`}
+                      className="mt-2 inline-flex h-9 cursor-pointer items-center rounded-lg border border-[#e6e7ec] bg-white px-3 text-sm text-zinc-700 hover:bg-zinc-50"
+                    >
+                      {importingLogo ? "Converting…" : "Import SVG or PNG"}
+                    </label>
+                    {selectedSource ? (
+                      <div className="mt-2 grid gap-2">
+                        <label className="flex items-center gap-2 text-sm text-zinc-600">
+                          <span className="w-12">Raise</span>
+                          <select
+                            aria-label="Raise"
+                            value={selectedSource.trace}
+                            disabled={importingLogo}
+                            onChange={(event) => void onLogoOptions({ trace: event.target.value as LogoTrace })}
+                            className="h-9 flex-1 rounded-lg border border-[#e6e7ec] bg-white px-2 text-sm"
+                          >
+                            {LOGO_TRACES.map((entry) => (
+                              <option key={entry.value} value={entry.value}>
+                                {entry.label}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        <label className="flex items-center gap-2 text-sm text-zinc-600">
+                          <span className="w-12">Edges</span>
+                          <select
+                            aria-label="Edges"
+                            value={selectedSource.edges}
+                            disabled={importingLogo}
+                            onChange={(event) => void onLogoOptions({ edges: event.target.value as LogoEdges })}
+                            className="h-9 flex-1 rounded-lg border border-[#e6e7ec] bg-white px-2 text-sm"
+                          >
+                            {LOGO_EDGES.map((entry) => (
+                              <option key={entry.value} value={entry.value}>
+                                {entry.label}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                      </div>
+                    ) : null}
+                    <p className="mt-1 text-xs text-zinc-400">
+                      {slug === "flexi-keychain"
+                        ? "Each emoji or logo gets its own bead after the letters, the same size as the others."
+                        : "Each emoji or logo gets its own key after the letters. Line art only raises just the drawn lines of a logo."}
+                    </p>
+                  </>
                 ) : settings.charms.length ? (
                   <div className="mt-2">
                     <NumberRow
@@ -489,6 +628,7 @@ export function MakerStudio({ slug }: { slug: string }) {
           }
           if (field.type === "number") {
             if (field.key === "linkHeight" && settings.linkStyle === "block") return null;
+            if (field.key === "holeDiameter" && slug === "clicker-keychain" && settings.loopStyle === "none") return null;
             if (
               (field.key === "linkSize" || field.key === "letterGap") &&
               settings.linkStyle !== "block" &&

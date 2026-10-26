@@ -82,10 +82,10 @@ export function isLogo(id: string) {
 }
 
 // Rings are centered on 0 with the longer side 0.98 wide, y up, holes wound opposite their outlines.
-export function registerLogo(rings: Ring[], preview: string) {
+export function registerLogo(rings: Ring[], preview: string, body: Ring[] | null = null) {
   logoCount += 1;
   const id = `${LOGO_PREFIX}${Date.now().toString(36)}-${logoCount}`;
-  const outlines = rings.filter((ring) => ringArea(ring) > 0);
+  const outlines = body ?? rings.filter((ring) => ringArea(ring) > 0);
   art.set(id, { body: outlines, mark: rings, pupil: [] });
   logoPreviews.set(id, preview);
   return id;
