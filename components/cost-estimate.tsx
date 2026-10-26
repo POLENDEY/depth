@@ -52,6 +52,41 @@ const DEFAULTS: CostSettings = {
   tax: "0",
 };
 
+type CostLine =
+  | "material"
+  | "electricity"
+  | "wear"
+  | "overhead"
+  | "setup"
+  | "finish"
+  | "extras"
+  | "cad"
+  | "failure"
+  | "discount"
+  | "rush"
+  | "minimumAdjustment"
+  | "paymentFee"
+  | "tax";
+
+type Included = Record<CostLine, boolean>;
+
+const ALL_INCLUDED: Included = {
+  material: true,
+  electricity: true,
+  wear: true,
+  overhead: true,
+  setup: true,
+  finish: true,
+  extras: true,
+  cad: true,
+  failure: true,
+  discount: true,
+  rush: true,
+  minimumAdjustment: true,
+  paymentFee: true,
+  tax: true,
+};
+
 const PLA_DENSITY = 1.24;
 const ESTIMATED_GRAMS_PER_HOUR = 15;
 
@@ -119,10 +154,12 @@ function money(value: number) {
   return `₱${value.toLocaleString("en-PH", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
-function calculateCost(settings: CostSettings, weight: number, hours: number) {
+// Every line is still computed so excluded ones can show what they would have added.
+function calculateCost(settings: CostSettings, weight: number, hours: number, included: Included) {
   const value = Object.fromEntries(
     Object.entries(settings).map(([key, entry]) => [key, typeof entry === "string" ? number(entry) : entry]),
   ) as Record<string, number | string>;
+  const kept = (line: CostLine, amount: number) => (included[line] ? amount : 0);
   const quantity = Math.max(1, Math.floor((value.quantity as number) || 1));
   const material = weight * (1 + (value.waste as number) / 100) * ((value.filamentPrice as number) / 1000) * quantity;
   const electricity =
@@ -132,22 +169,30 @@ function calculateCost(settings: CostSettings, weight: number, hours: number) {
   const setup = ((value.setupMinutes as number) / 60) * (value.laborRate as number);
   const finish = ((value.finishingMinutes as number) / 60) * (value.laborRate as number) * quantity;
   const extras = ((value.hardware as number) + (value.packaging as number)) * quantity;
-  const production = material + electricity + wear + overhead + setup + finish;
+  const cad = value.cad as number;
+  const production =
+    kept("material", material) +
+    kept("electricity", electricity) +
+    kept("wear", wear) +
+    kept("overhead", overhead) +
+    kept("setup", setup) +
+    kept("finish", finish);
   const failure = production * ((value.failure as number) / 100);
-  const cost = production + failure + extras + (value.cad as number);
+  const cost = production + kept("failure", failure) + kept("extras", extras) + kept("cad", cad);
   const profit = value.profit as number;
   const beforeDiscount =
     settings.pricingMode === "margin" ? cost / (1 - profit / 100) : cost * (1 + profit / 100);
   const discount = beforeDiscount * ((value.discount as number) / 100);
-  const afterDiscount = beforeDiscount - discount;
-  const afterRush = afterDiscount + (value.rush as number);
+  const afterDiscount = beforeDiscount - kept("discount", discount);
+  const rush = value.rush as number;
+  const afterRush = afterDiscount + kept("rush", rush);
   const minimumAdjustment = Math.max(0, (value.minimum as number) - afterRush);
-  const base = Math.max(afterRush, value.minimum as number);
+  const base = afterRush + kept("minimumAdjustment", minimumAdjustment);
   const feeRate = Math.min(99, value.paymentFee as number) / 100;
   const paymentFee = feeRate ? base / (1 - feeRate) - base : 0;
-  const pretax = base + paymentFee;
+  const pretax = base + kept("paymentFee", paymentFee);
   const tax = pretax * ((value.tax as number) / 100);
-  const finalOrder = pretax + tax;
+  const finalOrder = pretax + kept("tax", tax);
 
   return {
     material,
@@ -157,12 +202,12 @@ function calculateCost(settings: CostSettings, weight: number, hours: number) {
     setup,
     finish,
     extras,
-    cad: value.cad as number,
+    cad,
     failure,
     cost,
     beforeDiscount,
     discount,
-    rush: value.rush as number,
+    rush,
     minimumAdjustment,
     paymentFee,
     tax,
@@ -177,6 +222,7 @@ export function CostEstimate({ model, modelName }: { model: KeychainModel | null
   const [settings, setSettings] = useState<CostSettings>(DEFAULTS);
   const [weightOverride, setWeightOverride] = useState<{ volume: number; grams: string } | null>(null);
   const [hoursOverride, setHoursOverride] = useState<string | null>(null);
+  const [included, setIncluded] = useState<Included>(ALL_INCLUDED);
 
   const volume = useMemo(
     () => (model ? geometryVolume(model.base) + geometryVolume(model.text) : 0),
@@ -189,7 +235,13 @@ export function CostEstimate({ model, modelName }: { model: KeychainModel | null
   const hoursValue =
     hoursOverride === null ? estimatedHours : hoursOverride.trim() === "" ? Number.NaN : Number(hoursOverride);
   const inputError = validateInputs(settings, grams, hoursValue);
-  const estimate = inputError ? null : calculateCost(settings, grams, hoursValue);
+  const estimate = inputError ? null : calculateCost(settings, grams, hoursValue, included);
+  const line = (key: CostLine, label: string, sign = "") => ({
+    label,
+    value: estimate ? `${sign}${money(estimate[key])}` : "—",
+    included: included[key],
+    onToggle: () => setIncluded((current) => ({ ...current, [key]: !current[key] })),
+  });
 
   useEffect(() => {
     if (!open) return;
@@ -347,24 +399,36 @@ export function CostEstimate({ model, modelName }: { model: KeychainModel | null
               </p>
             ) : null}
             <section className="rounded-xl bg-[#1e1e24] p-4 text-white">
-              <h3 className="mb-3 text-sm font-semibold">Quotation breakdown</h3>
+              <div className="mb-3 flex items-center justify-between gap-4">
+                <h3 className="text-sm font-semibold">Quotation breakdown</h3>
+                {Object.values(included).some((on) => !on) ? (
+                  <button
+                    type="button"
+                    onClick={() => setIncluded(ALL_INCLUDED)}
+                    className="text-xs font-medium text-sky-300 hover:underline"
+                  >
+                    Include all
+                  </button>
+                ) : null}
+              </div>
+              <p className="mb-3 text-xs text-zinc-400">Uncheck a line to leave it out of the price.</p>
               <div className="space-y-2 text-sm">
-                <CostRow label="Material" value={estimate ? money(estimate.material) : "—"} />
-                <CostRow label="Electricity" value={estimate ? money(estimate.electricity) : "—"} />
-                <CostRow label="Maintenance / depreciation" value={estimate ? money(estimate.wear) : "—"} />
-                <CostRow label="Other machine overhead" value={estimate ? money(estimate.overhead) : "—"} />
-                <CostRow label="Setup labor" value={estimate ? money(estimate.setup) : "—"} />
-                <CostRow label="Finishing labor" value={estimate ? money(estimate.finish) : "—"} />
-                <CostRow label="Hardware + packaging" value={estimate ? money(estimate.extras) : "—"} />
-                <CostRow label="CAD / design" value={estimate ? money(estimate.cad) : "—"} />
-                <CostRow label="Failure reserve" value={estimate ? money(estimate.failure) : "—"} />
+                <CostRow {...line("material", "Material")} />
+                <CostRow {...line("electricity", "Electricity")} />
+                <CostRow {...line("wear", "Maintenance / depreciation")} />
+                <CostRow {...line("overhead", "Other machine overhead")} />
+                <CostRow {...line("setup", "Setup labor")} />
+                <CostRow {...line("finish", "Finishing labor")} />
+                <CostRow {...line("extras", "Hardware + packaging")} />
+                <CostRow {...line("cad", "CAD / design")} />
+                <CostRow {...line("failure", "Failure reserve")} />
                 <CostRow label="Total production cost" value={estimate ? money(estimate.cost) : "—"} emphasized />
                 <CostRow label="Price before discount" value={estimate ? money(estimate.beforeDiscount) : "—"} />
-                <CostRow label="Discount" value={estimate ? `−${money(estimate.discount)}` : "—"} />
-                <CostRow label="Rush fee" value={estimate ? money(estimate.rush) : "—"} />
-                <CostRow label="Minimum price adjustment" value={estimate ? money(estimate.minimumAdjustment) : "—"} />
-                <CostRow label="Payment fee allowance" value={estimate ? money(estimate.paymentFee) : "—"} />
-                <CostRow label="Tax added" value={estimate ? money(estimate.tax) : "—"} />
+                <CostRow {...line("discount", "Discount", "−")} />
+                <CostRow {...line("rush", "Rush fee")} />
+                <CostRow {...line("minimumAdjustment", "Minimum price adjustment")} />
+                <CostRow {...line("paymentFee", "Payment fee allowance")} />
+                <CostRow {...line("tax", "Tax added")} />
                 <div className="flex items-center justify-between gap-4 border-t border-zinc-600 pt-3 text-base font-semibold">
                   <span>Final order price · {estimate?.quantity ?? "—"} unit(s)</span>
                   <span className="text-right text-xl text-emerald-400">{estimate ? money(estimate.finalOrder) : "—"}</span>
@@ -427,15 +491,36 @@ function CostRow({
   label,
   value,
   emphasized = false,
+  included,
+  onToggle,
 }: {
   label: string;
   value: string;
   emphasized?: boolean;
+  included?: boolean;
+  onToggle?: () => void;
 }) {
+  const excluded = included === false;
   return (
     <div className={`flex items-center justify-between gap-4 ${emphasized ? "border-t border-zinc-600 pt-2 font-semibold" : ""}`}>
-      <span className="text-zinc-200">{label}</span>
-      <span className="shrink-0 text-right font-medium tabular-nums text-white">{value}</span>
+      {onToggle ? (
+        <label className="flex cursor-pointer items-center gap-2">
+          <input
+            type="checkbox"
+            checked={included}
+            onChange={onToggle}
+            className="h-4 w-4 shrink-0 cursor-pointer accent-emerald-400"
+          />
+          <span className={excluded ? "text-zinc-500 line-through" : "text-zinc-200"}>{label}</span>
+        </label>
+      ) : (
+        <span className="text-zinc-200">{label}</span>
+      )}
+      <span
+        className={`shrink-0 text-right font-medium tabular-nums ${excluded ? "text-zinc-500 line-through" : "text-white"}`}
+      >
+        {value}
+      </span>
     </div>
   );
 }
