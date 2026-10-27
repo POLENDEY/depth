@@ -47,7 +47,7 @@ declare module "clipper-lib" {
     ClipperOffset: typeof ClipperOffset;
     PolyTree: new () => PolyTree;
     Paths: new () => Paths;
-    ClipType: { ctUnion: number; ctDifference: number };
+    ClipType: { ctIntersection: number; ctUnion: number; ctDifference: number };
     PolyType: { ptSubject: number; ptClip: number };
     PolyFillType: { pftNonZero: number };
     JoinType: { jtRound: number };

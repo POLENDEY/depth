@@ -2,6 +2,7 @@ import ClipperLib from "clipper-lib";
 import type { Path, Paths } from "clipper-lib";
 import { SVGLoader } from "three/examples/jsm/loaders/SVGLoader.js";
 import { registerLogo } from "./charms";
+import { registerImageParts, type ImagePart } from "./image-parts";
 
 type Ring = [number, number][];
 
@@ -57,6 +58,417 @@ export async function importLogo(file: File, edges: LogoEdges = "smooth", trace:
   const id = await convertLogo(file, edges, trace);
   sources.set(id, { file, edges, trace });
   return id;
+}
+
+// Splits an SVG or PNG into its flat color regions, for clicker housings whose keys are
+// parts of the picture.
+export async function importImageParts(file: File) {
+  if (file.size > MAX_BYTES) throw new Error("That image is larger than 50 MB.");
+  const name = file.name.toLowerCase();
+  const isSvg = file.type === "image/svg+xml" || name.endsWith(".svg");
+  const isPng = file.type === "image/png" || name.endsWith(".png");
+  if (!isSvg && !isPng) throw new Error("Use an SVG or PNG image.");
+  const url = URL.createObjectURL(file);
+  try {
+    const image = await loadImage(url, isSvg).catch((reason) => {
+      if (isSvg) return null;
+      throw reason;
+    });
+    let vector = isSvg ? svgColorParts(await file.text()) : null;
+    // Clip paths, masks, filters, embedded bitmaps and blend modes don't survive the vector
+    // read, so keep it only when its colors match how the browser draws the picture.
+    if (vector && image && !matchesRender(vector, image)) vector = null;
+    const parts = vector ?? (image ? colorParts(image, isSvg ? SVG_RASTER : PARTS_RASTER) : []);
+    if (!parts.length) throw new Error("No solid shapes were found in that image.");
+    return registerImageParts(parts, image ? thumbnail(image) : "");
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+const MAX_COLORS = 24;
+// Colors closer than this (0-255 RGB distance) count as one flat color.
+const SAME_COLOR = 30;
+const PARTS_RASTER = 800;
+// SVGs draw crisply at any size, so they're traced finer.
+const SVG_RASTER = 1100;
+
+type Rgb = [number, number, number];
+
+// The SVG's own shapes, stacked in paint order, as the regions of each color that stay
+// visible. Returns null when the drawing uses something this can't flatten exactly.
+function svgColorParts(source: string): ImagePart[] | null {
+  let data: ReturnType<SVGLoader["parse"]>;
+  try {
+    data = new SVGLoader().parse(source);
+  } catch {
+    return null;
+  }
+  const document_ = new DOMParser().parseFromString(source, "image/svg+xml");
+  const paint = (value: unknown): Rgb | null | "none" => {
+    const text = String(value ?? "").trim();
+    if (!text || text === "none" || text === "transparent") return "none";
+    const url = text.match(/^url\(\s*['"]?#([^'")]+)['"]?\s*\)/);
+    if (url) return gradientColor(document_, url[1]);
+    return parseColor(text);
+  };
+
+  type Layer = { color: Rgb; alpha: number; paths: Paths };
+  const raw: { color: Rgb; alpha: number; points: { x: number; y: number }[][]; width: number; open: boolean }[] = [];
+  for (const path of data.paths) {
+    const style = (path.userData?.style ?? {}) as Record<string, string | number | undefined>;
+    const opacity = Number(style.opacity ?? 1);
+    const fill = paint(style.fill ?? "#000");
+    if (fill === null) return null;
+    const fillAlpha = Number(style.fillOpacity ?? 1) * opacity;
+    if (fill !== "none" && fillAlpha > 0.03) {
+      for (const shape of SVGLoader.createShapes(path)) {
+        const extracted = shape.extractPoints(24);
+        raw.push({ color: fill, alpha: fillAlpha, points: [extracted.shape, ...extracted.holes], width: 0, open: false });
+      }
+    }
+    const stroke = paint(style.stroke ?? "none");
+    if (stroke === null) return null;
+    const strokeWidth = Number(style.strokeWidth ?? 1);
+    const strokeAlpha = Number(style.strokeOpacity ?? 1) * opacity;
+    if (stroke !== "none" && strokeWidth > 0 && strokeAlpha > 0.03) {
+      for (const sub of path.subPaths) {
+        const points = sub.getPoints(24);
+        if (points.length < 2) continue;
+        const first = points[0];
+        const last = points[points.length - 1];
+        const closed = sub.autoClose || Math.hypot(first.x - last.x, first.y - last.y) < 1e-6;
+        raw.push({ color: stroke, alpha: strokeAlpha, points: [points], width: strokeWidth, open: !closed });
+      }
+    }
+  }
+  if (!raw.length) return null;
+
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const layer of raw) {
+    const pad = layer.width / 2;
+    for (const ring of layer.points) {
+      for (const point of ring) {
+        minX = Math.min(minX, point.x - pad);
+        minY = Math.min(minY, point.y - pad);
+        maxX = Math.max(maxX, point.x + pad);
+        maxY = Math.max(maxY, point.y + pad);
+      }
+    }
+  }
+  const span = Math.max(maxX - minX, maxY - minY);
+  if (!Number.isFinite(span) || span <= 0) return null;
+  const scale = GRID / span;
+  const toPath = (ring: { x: number; y: number }[]): Path =>
+    ring.map((point) => ({ X: Math.round((point.x - minX) * scale), Y: Math.round((point.y - minY) * scale) }));
+  const layers: Layer[] = raw.map((layer) => {
+    if (!layer.width) return { color: layer.color, alpha: layer.alpha, paths: unionAll(layer.points.map(toPath)) };
+    const offset = new ClipperLib.ClipperOffset(2, GRID * 0.0002);
+    offset.AddPaths(layer.points.map(toPath), ClipperLib.JoinType.jtRound, layer.open ? ClipperLib.EndType.etOpenRound : ClipperLib.EndType.etClosedLine);
+    const paths = new ClipperLib.Paths();
+    offset.Execute(paths, (layer.width / 2) * scale);
+    return { color: layer.color, alpha: layer.alpha, paths };
+  });
+
+  // A first shape filling the whole frame is a background, not part of the drawing.
+  const frame = GRID * GRID * ((maxX - minX) / span) * ((maxY - minY) / span);
+  if (layers.length > 1 && layers[0].alpha > 0.9 && Math.abs(layers[0].paths.reduce((sum, path) => sum + area(path), 0)) > frame * 0.97) {
+    layers.shift();
+  }
+
+  // Painter's algorithm: each layer covers what's under it, or tints it when see-through.
+  type Region = { color: Rgb; paths: Paths; box: ReturnType<typeof pathBox> };
+  let regions: Region[] = [];
+  for (const layer of layers) {
+    if (!layer.paths.length) continue;
+    const box = pathBox(layer.paths);
+    const next: Region[] = [];
+    let covered: Paths = [];
+    for (const region of regions) {
+      if (!boxesTouch(box, region.box)) {
+        next.push(region);
+        continue;
+      }
+      const rest = clip(region.paths, layer.paths);
+      if (rest.length) next.push({ color: region.color, paths: rest, box: pathBox(rest) });
+      if (layer.alpha < 0.97) {
+        const under = intersect(region.paths, layer.paths);
+        if (under.length) {
+          next.push({ color: blend(region.color, layer.color, layer.alpha), paths: under, box: pathBox(under) });
+          covered = [...covered, ...under];
+        }
+      }
+    }
+    const own = layer.alpha < 0.97 && covered.length ? clip(layer.paths, unionAll(covered)) : layer.paths;
+    if (own.length) next.push({ color: layer.color, paths: own, box: pathBox(own) });
+    regions = next;
+  }
+
+  // Same (or nearly the same) colors become one set of parts.
+  const colors: { color: Rgb; paths: Paths }[] = [];
+  for (const region of regions) {
+    const same = colors.find((entry) => Math.hypot(...entry.color.map((value, channel) => value - region.color[channel])) < 6);
+    if (same) same.paths.push(...region.paths);
+    else colors.push({ color: region.color, paths: [...region.paths] });
+  }
+  const all = colors.flatMap((entry) => entry.paths);
+  const box = pathBox(all);
+  const cx = (box.minX + box.maxX) / 2;
+  const cy = (box.minY + box.maxY) / 2;
+  const fit = 0.98 / Math.max(box.maxX - box.minX, box.maxY - box.minY);
+  const toRing = (path: Path, outer: boolean) => {
+    const ring = path.map((point) => ({ x: (point.X - cx) * fit, y: -(point.Y - cy) * fit }));
+    // The y flip reverses winding.
+    return area(path) < 0 === outer ? ring : ring.reverse();
+  };
+  const minimum = (GRID * 0.0015) ** 2;
+  const parts: ImagePart[] = [];
+  for (const entry of colors) {
+    const color = `#${entry.color.map((value) => Math.round(value).toString(16).padStart(2, "0")).join("")}`;
+    for (const polygon of ClipperLib.JS.PolyTreeToExPolygons(tree(entry.paths))) {
+      const size = Math.abs(area(polygon.outer)) - polygon.holes.reduce((sum, hole) => sum + Math.abs(area(hole)), 0);
+      if (size < minimum) continue;
+      parts.push({
+        color,
+        rings: [toRing(polygon.outer, true), ...polygon.holes.map((hole) => toRing(hole, false))],
+        area: size * fit * fit,
+      });
+    }
+  }
+  return parts.length ? parts : null;
+}
+
+function pathBox(paths: Paths) {
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const path of paths) {
+    for (const point of path) {
+      minX = Math.min(minX, point.X);
+      minY = Math.min(minY, point.Y);
+      maxX = Math.max(maxX, point.X);
+      maxY = Math.max(maxY, point.Y);
+    }
+  }
+  return { minX, minY, maxX, maxY };
+}
+
+function boxesTouch(a: ReturnType<typeof pathBox>, b: ReturnType<typeof pathBox>) {
+  return a.minX <= b.maxX && b.minX <= a.maxX && a.minY <= b.maxY && b.minY <= a.maxY;
+}
+
+function intersect(subject: Paths, cut: Paths) {
+  const clipper = new ClipperLib.Clipper(0);
+  clipper.AddPaths(subject, ClipperLib.PolyType.ptSubject, true);
+  clipper.AddPaths(cut, ClipperLib.PolyType.ptClip, true);
+  const result = new ClipperLib.PolyTree();
+  clipper.Execute(ClipperLib.ClipType.ctIntersection, result, ClipperLib.PolyFillType.pftNonZero, ClipperLib.PolyFillType.pftNonZero);
+  return ClipperLib.Clipper.PolyTreeToPaths(result);
+}
+
+function blend(under: Rgb, over: Rgb, alpha: number): Rgb {
+  return under.map((value, channel) => value * (1 - alpha) + over[channel] * alpha) as Rgb;
+}
+
+const probe = typeof document === "undefined" ? null : document.createElement("canvas").getContext("2d");
+
+function parseColor(text: string): Rgb | null {
+  if (!probe) return null;
+  probe.fillStyle = "#010203";
+  probe.fillStyle = text;
+  const value = String(probe.fillStyle);
+  if (value === "#010203" && text.toLowerCase() !== "#010203") return null;
+  const hex = value.match(/^#([0-9a-f]{6})$/i);
+  if (hex) return [0, 2, 4].map((at) => parseInt(hex[1].slice(at, at + 2), 16)) as Rgb;
+  const rgba = value.match(/rgba?\(([\d.]+),\s*([\d.]+),\s*([\d.]+)/);
+  return rgba ? [Number(rgba[1]), Number(rgba[2]), Number(rgba[3])] : null;
+}
+
+// A gradient printed as one color: the average of its stops.
+function gradientColor(document_: Document, id: string, depth = 0): Rgb | null {
+  const element = document_.getElementById(id);
+  if (!element || depth > 4) return null;
+  const stops = [...element.querySelectorAll("stop")];
+  if (!stops.length) {
+    const href = element.getAttribute("href") ?? element.getAttribute("xlink:href");
+    return href?.startsWith("#") ? gradientColor(document_, href.slice(1), depth + 1) : null;
+  }
+  const colors = stops
+    .map((stop) => {
+      const style = stop.getAttribute("style") ?? "";
+      const inline = style.match(/stop-color\s*:\s*([^;]+)/)?.[1];
+      return parseColor((inline ?? stop.getAttribute("stop-color") ?? "#000").trim());
+    })
+    .filter((color): color is Rgb => Boolean(color));
+  if (!colors.length) return null;
+  return [0, 1, 2].map((channel) => colors.reduce((sum, color) => sum + color[channel], 0) / colors.length) as Rgb;
+}
+
+// The picture drawn by the browser at `raster` pixels on its longer side, and which of
+// its pixels are the drawing rather than the background.
+function rendered(image: HTMLImageElement, raster: number) {
+  const naturalWidth = image.naturalWidth || raster;
+  const naturalHeight = image.naturalHeight || raster;
+  const fit = raster / Math.max(naturalWidth, naturalHeight);
+  const width = Math.max(1, Math.round(naturalWidth * fit));
+  const height = Math.max(1, Math.round(naturalHeight * fit));
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const context = canvas.getContext("2d", { willReadFrequently: true });
+  if (!context) throw new Error("This browser cannot read images.");
+  context.drawImage(image, 0, 0, width, height);
+  const pixels = context.getImageData(0, 0, width, height).data;
+  let clear = 0;
+  for (let index = 3; index < pixels.length; index += 4) if (pixels[index] < 200) clear += 1;
+  const transparent = clear > width * height * 0.02;
+  const background = [0, 0, 0];
+  let edge = 0;
+  for (let x = 0; x < width; x += 1) {
+    for (let y = 0; y < height; y += 1) {
+      if (x > 0 && y > 0 && x < width - 1 && y < height - 1) continue;
+      const at = (y * width + x) * 4;
+      for (let channel = 0; channel < 3; channel += 1) background[channel] += pixels[at + channel];
+      edge += 1;
+    }
+  }
+  for (let channel = 0; channel < 3; channel += 1) background[channel] /= edge;
+  const solid = (at: number) =>
+    transparent
+      ? pixels[at + 3] >= 128
+      : Math.hypot(pixels[at] - background[0], pixels[at + 1] - background[1], pixels[at + 2] - background[2]) > 50;
+  return { width, height, pixels, solid };
+}
+
+// True when nearly every drawn pixel is close to one of the vector parts' colors.
+function matchesRender(parts: ImagePart[], image: HTMLImageElement) {
+  const { pixels, solid } = rendered(image, 300);
+  const colors = [...new Set(parts.map((part) => part.color))].map(
+    (color) => [1, 3, 5].map((at) => parseInt(color.slice(at, at + 2), 16)) as Rgb,
+  );
+  const rasterShare = colors.map(() => 0);
+  let drawn = 0;
+  let unexplained = 0;
+  for (let at = 0; at < pixels.length; at += 4) {
+    if (!solid(at)) continue;
+    drawn += 1;
+    let best = 0;
+    let near = Infinity;
+    colors.forEach((color, index) => {
+      const distance = Math.hypot(pixels[at] - color[0], pixels[at + 1] - color[1], pixels[at + 2] - color[2]);
+      if (distance < near) {
+        near = distance;
+        best = index;
+      }
+    });
+    if (near > 60) unexplained += 1;
+    else rasterShare[best] += 1;
+  }
+  if (!drawn || unexplained / drawn > 0.08) return false;
+  // And each color covers about as much of the picture as it does when drawn.
+  const total = parts.reduce((sum, part) => sum + part.area, 0);
+  const vectorShare = colors.map(() => 0);
+  for (const part of parts) {
+    const index = colors.findIndex((color) => `#${color.map((value) => value.toString(16).padStart(2, "0")).join("")}` === part.color);
+    if (index >= 0) vectorShare[index] += part.area / total;
+  }
+  const difference = colors.reduce((sum, _, index) => sum + Math.abs(vectorShare[index] - rasterShare[index] / drawn), 0) / 2;
+  return difference < 0.15;
+}
+
+function colorParts(image: HTMLImageElement, raster: number): ImagePart[] {
+  const { width, height, pixels, solid } = rendered(image, raster);
+
+  // Coarse color histogram, then the most common colors become the palette.
+  const bins = new Map<number, { count: number; sum: [number, number, number] }>();
+  let filled = 0;
+  for (let at = 0; at < pixels.length; at += 4) {
+    if (!solid(at)) continue;
+    filled += 1;
+    const key = ((pixels[at] >> 4) << 8) | ((pixels[at + 1] >> 4) << 4) | (pixels[at + 2] >> 4);
+    const bin = bins.get(key) ?? { count: 0, sum: [0, 0, 0] };
+    bin.count += 1;
+    bin.sum[0] += pixels[at];
+    bin.sum[1] += pixels[at + 1];
+    bin.sum[2] += pixels[at + 2];
+    bins.set(key, bin);
+  }
+  if (!filled) return [];
+  const palette: { color: [number, number, number]; count: number }[] = [];
+  for (const bin of [...bins.values()].sort((a, b) => b.count - a.count)) {
+    if (bin.count < filled * 0.0015) break;
+    const color = bin.sum.map((value) => value / bin.count) as [number, number, number];
+    const near = palette.find((entry) => Math.hypot(...entry.color.map((value, channel) => value - color[channel])) < SAME_COLOR);
+    if (near) {
+      const total = near.count + bin.count;
+      near.color = near.color.map((value, channel) => (value * near.count + color[channel] * bin.count) / total) as [number, number, number];
+      near.count = total;
+    } else if (palette.length < MAX_COLORS) {
+      palette.push({ color, count: bin.count });
+    }
+  }
+  const labels = new Int8Array(width * height).fill(-1);
+  for (let index = 0; index < width * height; index += 1) {
+    const at = index * 4;
+    if (!solid(at)) continue;
+    let best = 0;
+    let bestDistance = Infinity;
+    palette.forEach((entry, label) => {
+      const distance = Math.hypot(pixels[at] - entry.color[0], pixels[at + 1] - entry.color[1], pixels[at + 2] - entry.color[2]);
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        best = label;
+      }
+    });
+    labels[index] = best;
+  }
+
+  const cell = GRID / Math.max(width, height);
+  const traced = palette.map((entry, label) => ({
+    color: `#${entry.color.map((value) => Math.round(value).toString(16).padStart(2, "0")).join("")}`,
+    paths: smoothRings(width, height, (x, y) => (labels[y * width + x] === label ? 1 : 0), 0.7, cell),
+  }));
+  const all = traced.flatMap((entry) => entry.paths);
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const path of all) {
+    for (const point of path) {
+      minX = Math.min(minX, point.X);
+      minY = Math.min(minY, point.Y);
+      maxX = Math.max(maxX, point.X);
+      maxY = Math.max(maxY, point.Y);
+    }
+  }
+  const span = Math.max(maxX - minX, maxY - minY);
+  if (!Number.isFinite(span) || span <= 0) return [];
+  const unit = 0.98 / span;
+  const cx = (minX + maxX) / 2;
+  const cy = (minY + maxY) / 2;
+  // Within half a pixel of the trace, with far fewer points.
+  const toRing = (path: Path, outer: boolean) => {
+    const ring = simplify(path, cell * 0.4).map((point) => ({ x: (point.X - cx) * unit, y: (point.Y - cy) * unit }));
+    return area(path) > 0 === outer ? ring : ring.reverse();
+  };
+  const minimum = filled * cell * cell * 0.0004;
+  const parts: ImagePart[] = [];
+  for (const entry of traced) {
+    for (const polygon of ClipperLib.JS.PolyTreeToExPolygons(tree(entry.paths))) {
+      const size = Math.abs(area(polygon.outer)) - polygon.holes.reduce((sum, hole) => sum + Math.abs(area(hole)), 0);
+      if (size < minimum) continue;
+      parts.push({
+        color: entry.color,
+        rings: [toRing(polygon.outer, true), ...polygon.holes.map((hole) => toRing(hole, false))],
+        area: size * unit * unit,
+      });
+    }
+  }
+  return parts;
 }
 
 export async function emojiLineArt(emoji: string, edges: LogoEdges = "smooth") {

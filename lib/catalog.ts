@@ -1,3 +1,4 @@
+import type { CapShape, HousingShape, Pt } from "./clicker-layout";
 import type { CharmPlacement } from "./geometry";
 import { SAMPLE_SPOTIFY_BARS } from "./spotify-code";
 
@@ -7,6 +8,20 @@ export type TextFlow = "vertical" | "horizontal";
 export type LinkStyle = "tile" | "block";
 export type LoopStyle = "tab" | "ring" | "heart" | "star" | "corner" | "none";
 export type LoopSide = "left" | "right";
+
+export type SurfacePattern = "plain" | "ribs" | "stripes" | "waves" | "diamond" | "dots";
+export type SurfaceOn = "both" | "housing" | "caps";
+
+export type PartCaps = "whole" | "parts";
+
+export const SURFACE_PATTERNS: { value: SurfacePattern; label: string }[] = [
+  { value: "plain", label: "Plain" },
+  { value: "ribs", label: "Vertical ribs" },
+  { value: "stripes", label: "Horizontal stripes" },
+  { value: "waves", label: "Waves" },
+  { value: "diamond", label: "Diamond knurl" },
+  { value: "dots", label: "Dots" },
+];
 
 export const LOOP_STYLES: { value: LoopStyle; label: string }[] = [
   { value: "tab", label: "Rounded tab" },
@@ -92,6 +107,17 @@ export type ProductSettings = {
   linkStyle: LinkStyle;
   loopStyle: LoopStyle;
   loopSide: LoopSide;
+  surface: SurfacePattern;
+  surfaceOn: SurfaceOn;
+  housingShape: HousingShape;
+  housingLogo: string;
+  capShape: CapShape;
+  housingSize: number;
+  keyLayout: Pt[];
+  // Groups of imported image parts; each group is one clicker key.
+  housingParts: number[][];
+  // "whole": a cap is its part with everything drawn inside it; "parts": just the part.
+  partCaps: PartCaps;
   charms: CharmPlacement[];
   charmBase: number;
   tagSize: number;
@@ -115,6 +141,8 @@ export type Field =
   | { type: "text-flow"; label: string }
   | { type: "link-style"; label: string }
   | { type: "loop-style"; label: string }
+  | { type: "surface"; label: string }
+  | { type: "housing"; label: string }
   | { type: "charm" }
   | { type: "colors"; text: string; base: string };
 
@@ -149,6 +177,15 @@ const shared = {
   linkStyle: "tile" as LinkStyle,
   loopStyle: "tab" as LoopStyle,
   loopSide: "left" as LoopSide,
+  surface: "plain" as SurfacePattern,
+  surfaceOn: "both" as SurfaceOn,
+  housingShape: "rect" as HousingShape,
+  housingLogo: "",
+  capShape: "match" as CapShape,
+  housingSize: 0,
+  keyLayout: [] as Pt[],
+  housingParts: [] as number[][],
+  partCaps: "whole" as PartCaps,
   charms: [] as CharmPlacement[],
   charmBase: 1.2,
   tagSize: 48,
@@ -348,6 +385,8 @@ export const PRODUCTS: Product[] = [
       { type: "charm" },
       { type: "number", key: "letterHeight", label: "Letter size", min: 6, max: 13, step: 0.5 },
       { type: "number", key: "textThickness", label: "Letter thickness", min: 0.6, max: 1.6, step: 0.1 },
+      { type: "housing", label: "Housing shape" },
+      { type: "surface", label: "Pattern" },
       { type: "loop-style", label: "Keyring hole" },
       { type: "number", key: "holeDiameter", label: "Ring hole", min: 3, max: 6, step: 0.5 },
       { type: "colors", text: "Letters", base: "Housing & caps" },

@@ -387,6 +387,7 @@ export function Viewer({
       return;
     }
     const colors = textSlotColors(model.text, textColor, lineColorKey ? lineColorKey.split(",") : []);
+    api.textMat.color.set(colors[0]);
     while (extra.length < colors.length - 1) extra.push(api.textMat.clone());
     colors.slice(1).forEach((color, index) => extra[index].color.set(color));
     api.textMesh.material = [api.textMat, ...extra.slice(0, colors.length - 1)];

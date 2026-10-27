@@ -1275,6 +1275,8 @@ export function hasLineColors(text: THREE.BufferGeometry) {
 
 export function textSlotColors(text: THREE.BufferGeometry, textColor: string, lineColors: string[] = []) {
   if (!hasLineColors(text)) return [textColor];
+  // Layers colored from an imported image carry their own palette.
+  if (Array.isArray(text.userData.slotColors)) return text.userData.slotColors as string[];
   const slots = Math.max(0, ...text.groups.map((group) => group.materialIndex ?? 0)) + 1;
   return Array.from({ length: slots }, (_, slot) => (slot === 0 ? textColor : lineColors[slot - 1] || textColor));
 }

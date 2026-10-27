@@ -1,8 +1,19 @@
 import type { Font } from "opentype.js";
 import * as THREE from "three";
 import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js";
-import { TAG_GROUPS, type LoopStyle, type ProductSettings, type TagShape } from "./catalog";
+import { TAG_GROUPS, type LoopStyle, type ProductSettings, type SurfacePattern, type TagShape } from "./catalog";
 import { charmLayers, isLogo } from "./charms";
+import {
+  bounds,
+  clickerLayout,
+  clickerLayoutInput,
+  PART,
+  partsLayout,
+  partsMode,
+  type ClickerLayout,
+  type Polygon,
+  type Pt,
+} from "./clicker-layout";
 import { decodeSpotifyBars, spotifyLogoLoops, type SpotifyPoint } from "./spotify-code";
 import { familiarParts, type TagPoint } from "./tag-shapes";
 import {
@@ -773,9 +784,195 @@ export const CLICKER = {
   crossWidth: 1.35,
   capHeight: 9,
   capTop: 15.4,
+  // Pockets one wall apart, so the walls between keys match the outer walls.
+  pitch: 19.4 + (23.5 - 19.4) / 2,
 };
 
+export function clickerLength(keys: number) {
+  return CLICKER.unit + (keys - 1) * CLICKER.pitch;
+}
+
+// Rounded square ring, counter-clockwise, at height z.
+function squareRing(cx: number, cy: number, size: number, radius: number, corner: number, z: number) {
+  const h = size / 2 - radius;
+  const points: THREE.Vector3[] = [];
+  [[h, h], [-h, h], [-h, -h], [h, -h]].forEach(([x, y], index) => {
+    for (let step = 0; step <= corner; step += 1) {
+      const angle = (index + step / corner) * (Math.PI / 2);
+      points.push(new THREE.Vector3(cx + x + Math.cos(angle) * radius, cy + y + Math.sin(angle) * radius, z));
+    }
+  });
+  return points;
+}
+
+// Flat face at one height bounded by `outer` with `holes` cut out.
+function holedFace(outer: THREE.Vector3[], holes: THREE.Vector3[][], facing: 1 | -1) {
+  const flat = (ring: THREE.Vector3[]) => ring.map((point) => new THREE.Vector2(point.x, point.y));
+  const contour = flat(outer);
+  const triangles = THREE.ShapeUtils.triangulateShape(contour, holes.map(flat));
+  const all = [outer, ...holes].flat();
+  return surface(all.flatMap((point) => [point.x, point.y, point.z]), facedUp(all, triangles, facing));
+}
+
+// Triangulation winds every triangle the same way, including zero-area slivers, so the
+// whole face is flipped at once from its total area.
+function facedUp(points: { x: number; y: number }[], triangles: number[][], facing: 1 | -1) {
+  const area = triangles.reduce((sum, [a, b, c]) => {
+    const [p, q, r] = [points[a], points[b], points[c]];
+    return sum + (q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x);
+  }, 0);
+  return triangles.flatMap(([a, b, c]) => (area > 0 === (facing === 1) ? [a, b, c] : [a, c, b]));
+}
+
+const smoothstep = (from: number, to: number, value: number) => {
+  const t = clamp((value - from) / (to - from), 0, 1);
+  return t * t * (3 - 2 * t);
+};
+
+// Pattern height from 0 to 1 at distance `s` around a wall of length `around` and height
+// `z` (mm). Periods along the wall are snapped so the pattern closes without a seam.
+function patternHeight(pattern: SurfacePattern, s: number, z: number, around: number) {
+  const snap = (period: number) => around / Math.max(1, Math.round(around / period));
+  const crest = (u: number) => smoothstep(0.35, 0.65, 0.5 + 0.5 * Math.cos(2 * Math.PI * u));
+  const tent = (u: number) => 1 - 2 * Math.abs(u - Math.round(u));
+  switch (pattern) {
+    case "ribs":
+      return crest(s / snap(2.4));
+    case "stripes":
+      return crest(z / 2.4);
+    case "waves":
+      return crest((z + 0.9 * Math.sin((2 * Math.PI * s) / snap(9))) / 2.6);
+    case "diamond": {
+      const period = snap(3.2);
+      return Math.max(smoothstep(0.55, 0.8, tent((s + z) / period)), smoothstep(0.55, 0.8, tent((s - z) / period)));
+    }
+    case "dots": {
+      const period = snap(3);
+      const row = Math.round(z / 2.6);
+      const shift = row % 2 ? period / 2 : 0;
+      const column = Math.round((s - shift) / period) * period + shift;
+      return 1 - smoothstep(0.55, 0.95, Math.hypot(s - column, z - row * 2.6));
+    }
+    default:
+      return 0;
+  }
+}
+
+type Samples = { points: Pt[]; normals: Pt[]; around: number };
+
+// Points evenly spaced around a counterclockwise outline, with outward normals.
+function sampleOutline(outline: Pt[], spacing: number): Samples {
+  const lengths = outline.map((point, index) => {
+    const next = outline[(index + 1) % outline.length];
+    return Math.hypot(next.x - point.x, next.y - point.y);
+  });
+  const around = lengths.reduce((sum, length) => sum + length, 0);
+  const count = Math.max(48, Math.ceil(around / spacing));
+  const points: Pt[] = [];
+  let edge = 0;
+  let start = 0;
+  for (let index = 0; index < count; index += 1) {
+    const s = (index / count) * around;
+    while (edge < outline.length - 1 && start + lengths[edge] < s) start += lengths[edge++];
+    const a = outline[edge];
+    const b = outline[(edge + 1) % outline.length];
+    const t = lengths[edge] > 0 ? (s - start) / lengths[edge] : 0;
+    points.push({ x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t });
+  }
+  const normals = points.map((_, index) => {
+    const before = points[(index + count - 1) % count];
+    const after = points[(index + 1) % count];
+    const length = Math.hypot(after.x - before.x, after.y - before.y) || 1;
+    return { x: (after.y - before.y) / length, y: -(after.x - before.x) / length };
+  });
+  return { points, normals, around };
+}
+
+// The sampled outline at height z, each point pushed out along its normal by `push(s, z)`.
+function ringAt(
+  samples: Samples,
+  z: number,
+  push: (s: number, z: number, around: number) => number = () => 0,
+  dx = 0,
+  dy = 0,
+) {
+  const { points, normals, around } = samples;
+  return points.map((point, index) => {
+    const out = push((index / points.length) * around, z, around);
+    return new THREE.Vector3(dx + point.x + normals[index].x * out, dy + point.y + normals[index].y * out, z);
+  });
+}
+
+// Heights from `from` to `to` no more than `step` apart, both ends included.
+function levels(from: number, to: number, step: number) {
+  const count = Math.max(1, Math.ceil((to - from) / step));
+  return Array.from({ length: count + 1 }, (_, index) => from + ((to - from) * index) / count);
+}
+
+const HOUSING_RELIEF = 0.6;
+const CAP_RELIEF = 0.4;
+
+// One closed shell: outer wall, then per socket a pocket for the keycap, the 1.5 mm plate
+// the switch clips into, and the cavity for its body and pins. Stacked slabs instead print
+// a visible seam at every join.
+function clickerHousing(
+  layout: Pick<ClickerLayout, "outline" | "pocket" | "positions">,
+  corner: number,
+  pattern: SurfacePattern,
+  spacing: number,
+  abovePlate = CLICKER.wall,
+  rim?: { recess: Pt[]; height: number },
+) {
+  const k = CLICKER;
+  const z = [0, k.floor, k.floor + k.below, k.floor + k.below + k.plate, k.floor + k.below + k.plate + abovePlate];
+  const top = z[4] + (rim?.height ?? 0);
+  const outer = sampleOutline(layout.outline, spacing);
+  const pocket = sampleOutline(layout.pocket, spacing);
+  // Raised pattern, fading out before the bottom and top edges so those stay flat.
+  const push = (s: number, height: number, around: number) =>
+    HOUSING_RELIEF *
+    patternHeight(pattern, s, height, around) *
+    smoothstep(0.8, 2, height) *
+    (1 - smoothstep(top - 2, top - 0.8, height));
+  const wall = (pattern === "plain" ? [z[0], top] : levels(z[0], top, spacing)).map((height) =>
+    ringAt(outer, height, push),
+  );
+  const pockets = (level: number) => layout.positions.map(({ x, y }) => ringAt(pocket, level, undefined, x, y));
+  const parts = [holedFace(wall[0], [], -1), loft(wall, false)];
+  if (rim) {
+    const recess = sampleOutline(rim.recess, spacing);
+    const recessTop = ringAt(recess, top);
+    const recessFloor = ringAt(recess, z[4]);
+    parts.push(
+      holedFace(wall[wall.length - 1], [recessTop], 1),
+      loft([recessFloor, recessTop], true),
+      holedFace(recessFloor, pockets(z[4]), 1),
+    );
+  } else {
+    parts.push(holedFace(wall[wall.length - 1], pockets(z[4]), 1));
+  }
+  const tops = pockets(z[4]);
+  pockets(z[3]).forEach((ring, index) => {
+    const { x, y } = layout.positions[index];
+    const pocketTop = tops[index];
+    const cutTop = squareRing(x, y, k.cutout, 0.3, corner, z[3]);
+    const cutBottom = squareRing(x, y, k.cutout, 0.3, corner, z[2]);
+    const cavityTop = squareRing(x, y, k.cavity, 0.6, corner, z[2]);
+    const cavityBottom = squareRing(x, y, k.cavity, 0.6, corner, z[1]);
+    parts.push(
+      loft([ring, pocketTop], true),
+      holedFace(ring, [cutTop], 1),
+      loft([cutBottom, cutTop], true),
+      holedFace(cavityTop, [cutBottom], -1),
+      loft([cavityBottom, cavityTop], true),
+      holedFace(cavityBottom, [], 1),
+    );
+  });
+  return fuse(parts);
+}
+
 function clickerKeychain(font: Font, settings: ProductSettings, quality: MeshQuality) {
+  if (partsMode(settings)) return partsClicker(settings, quality);
   const chars = Array.from(settings.text.normalize("NFC"))
     .filter((char) => char.trim())
     .slice(0, 8);
@@ -788,40 +985,27 @@ function clickerKeychain(font: Font, settings: ProductSettings, quality: MeshQua
   const fine = quality === "print" ? 40 : 20;
   const corner = quality === "print" ? 10 : 6;
   const k = CLICKER;
-  const length = keys * k.unit;
-  const centers = Array.from({ length: keys }, (_, index) => (index + 0.5) * k.unit);
-  const socketRow = (size: number, radius: number) => {
-    const shape = roundedRect(length, k.unit, 3);
-    for (const x of centers) {
-      const hole = roundedRect(size, size, radius);
-      shape.holes.push(new THREE.Path(hole.getPoints(corner).map((point) => new THREE.Vector2(point.x + x - length / 2, point.y))));
-    }
-    return shape;
-  };
+  const layout = clickerLayout(clickerLayoutInput(settings, keys));
+  if (layout.error) throw new Error(layout.error);
 
-  const bodies: THREE.BufferGeometry[] = [];
-  const letters: THREE.BufferGeometry[] = [];
-  const layers: [THREE.Shape, number, number][] = [
-    [roundedRect(length, k.unit, 3), 0, k.floor],
-    [socketRow(k.cavity, 0.6), k.floor, k.below],
-    [socketRow(k.cutout, 0.3), k.floor + k.below, k.plate],
-    [socketRow(k.pocket, 1.8), k.floor + k.below + k.plate, k.wall],
+  const spacing = quality === "print" ? 0.3 : 0.5;
+  const onHousing = settings.surfaceOn !== "caps" ? settings.surface : "plain";
+  const onCaps = settings.surfaceOn !== "housing" ? settings.surface : "plain";
+  const bodies: THREE.BufferGeometry[] = [
+    clickerHousing(layout, corner, onHousing, spacing),
+    ...placedLoop(settings, layout.outline, holeRadius, fine),
   ];
-  for (const [shape, z, depth] of layers) {
-    const layer = extrudeShapes([shape], depth, corner);
-    layer.translate(length / 2, 0, z);
-    bodies.push(layer);
-  }
+  const letters: THREE.BufferGeometry[] = [];
 
-  const right = settings.loopSide === "right";
-  for (const part of clickerLoop(settings.loopStyle, holeRadius, right ? -1 : 1, fine)) {
-    if (right) part.rotateZ(Math.PI).translate(length, 0, 0);
-    bodies.push(part);
-  }
-
-  const capY = -(k.unit / 2 + 6 + k.cap / 2);
-  for (const [index, x] of centers.entries()) {
-    for (const part of keycap(fine, corner)) {
+  // Keycaps in a row in front of the housing, each centered on its own switch.
+  const capBox = bounds(layout.cap);
+  const housingBox = bounds(layout.outline);
+  const capY = housingBox.minY - 6 - capBox.maxY;
+  const capStep = capBox.maxX - capBox.minX + 4;
+  const capStart = housingBox.minX - capBox.minX;
+  for (let index = 0; index < keys; index += 1) {
+    const x = capStart + index * capStep;
+    for (const part of keycap(layout.cap, fine, corner, onCaps, spacing)) {
       part.translate(x, capY, 0);
       bodies.push(part);
     }
@@ -842,9 +1026,119 @@ function clickerKeychain(font: Font, settings: ProductSettings, quality: MeshQua
   return pack(letters.length ? fuse(letters) : new THREE.BufferGeometry(), fuse(bodies), warnings);
 }
 
-// Keyring loop off the housing's left end (x = 0), lying flat on the bed. `back` is the
-// side away from the keycaps, so the corner loop stays clear of them once mirrored.
-function clickerLoop(style: LoopStyle, hole: number, back: number, fine: number) {
+const LOOP_SINK = 0.5;
+
+// The keyring loop on the housing outline's end facing the chosen side or back corner.
+function placedLoop(settings: ProductSettings, outline: Pt[], holeRadius: number, fine: number) {
+  const side = settings.loopSide === "right" ? 1 : -1;
+  const style = settings.loopStyle === "corner" ? "tab" : settings.loopStyle;
+  const direction = settings.loopStyle === "corner" ? { x: side * Math.SQRT1_2, y: Math.SQRT1_2 } : { x: side, y: 0 };
+  // The middle of the outline's flat or rounded end facing `direction`.
+  const reach = (point: Pt) => point.x * direction.x + point.y * direction.y;
+  const farthest = Math.max(...outline.map(reach));
+  const end = outline.filter((point) => reach(point) > farthest - 0.5);
+  const anchor = {
+    x: end.reduce((sum, point) => sum + point.x, 0) / end.length,
+    y: end.reduce((sum, point) => sum + point.y, 0) / end.length,
+  };
+  return clickerLoop(style, holeRadius, fine).map((part) =>
+    part
+      .rotateZ(Math.atan2(direction.y, direction.x) - Math.PI)
+      .translate(anchor.x - direction.x * LOOP_SINK, anchor.y - direction.y * LOOP_SINK, 0),
+  );
+}
+
+// Base top just above the switch's top housing (6.6 mm over the plate), so the lid and
+// the caps pressed flat on it clear the switch.
+const PART_BASE_WALL = 6.9;
+
+function partsClicker(settings: ProductSettings, quality: MeshQuality) {
+  const layout = partsLayout(settings.housingLogo, settings.housingParts, settings.housingSize, settings.partCaps);
+  if (!layout) throw new Error("That image is no longer loaded. Upload it again.");
+  if (layout.error) throw new Error(layout.error);
+  const k = CLICKER;
+  const fine = quality === "print" ? 40 : 20;
+  const corner = quality === "print" ? 10 : 6;
+  const spacing = quality === "print" ? 0.3 : 0.5;
+  const pattern = settings.surface;
+  const holeRadius = clamp(settings.holeDiameter, 3, 6) / 2;
+  const bodies: THREE.BufferGeometry[] = [
+    clickerHousing(layout, corner, pattern, spacing, PART_BASE_WALL, { recess: layout.recess, height: PART.lid }),
+    ...placedLoop(settings, layout.outline, holeRadius, fine),
+  ];
+  const palette: string[] = [];
+  const colored: { geometry: THREE.BufferGeometry; slot: number }[] = [];
+  const paint = (geometry: THREE.BufferGeometry, color: string) => {
+    if (!palette.includes(color)) palette.push(color);
+    colored.push({ geometry, slot: palette.indexOf(color) });
+  };
+
+  // Lid beside the base, its picture colors inlaid on top.
+  const box = bounds(layout.outline);
+  const lidX = box.maxX - box.minX + 8;
+  const lidBody = PART.lid - PART.inlay;
+  if (layout.lid.length) bodies.push(extrudeShapes(polygonShapes(layout.lid), lidBody, fine).translate(lidX, 0, 0));
+  for (const inlay of layout.lid.length ? layout.inlays : []) {
+    paint(extrudeShapes(polygonShapes(inlay.polygons), PART.inlay + FUSE, fine).translate(lidX, 0, lidBody - FUSE), inlay.color);
+  }
+
+  // Caps printed top face down beside each other, in front of the base. Built assembled
+  // (stem post down), then flipped, which also mirrors them the right way for printing.
+  const postLength = k.socket + 0.3;
+  let capX = box.minX;
+  layout.keys.forEach((key, index) => {
+    const at = layout.positions[index];
+    const local = (polygons: Polygon[]) =>
+      polygonShapes(polygons.map((polygon) => polygon.map((ring) => ring.map((point) => ({ x: point.x - at.x, y: point.y - at.y })))));
+    const capBody = PART.slab - PART.inlay;
+    const slab = extrudeShapes(local([key.cap]), capBody, fine);
+    slab.translate(0, 0, postLength);
+    const post = disk(k.post);
+    post.holes.push(crossPath(k.crossLength, k.crossWidth));
+    const cap = fuse([slab, extrudeShapes([post], postLength + 0.3, fine)]);
+    const tops = [...key.inlays, ...(key.border.length ? [{ color: settings.baseColor, polygons: key.border }] : [])].map((inlay) => ({
+      geometry: extrudeShapes(local(inlay.polygons), PART.inlay + FUSE, fine).translate(0, 0, postLength + capBody - FUSE),
+      color: inlay.color,
+    }));
+    const placed = [cap, ...tops.map((top) => top.geometry)];
+    // The preview shows the picture up, as assembled; the print file lays it face down.
+    if (quality === "print") for (const geometry of placed) geometry.rotateX(Math.PI).translate(0, 0, postLength + PART.slab);
+    cap.computeBoundingBox();
+    const capBox = cap.boundingBox!.clone();
+    for (const geometry of placed) geometry.translate(capX - capBox.min.x, box.minY - 6 - capBox.max.y, 0);
+    capX += capBox.max.x - capBox.min.x + 4;
+    paint(cap, settings.baseColor);
+    for (const top of tops) paint(top.geometry, top.color);
+  });
+
+  const pieces = colored.map(({ geometry }) => (geometry.index ? geometry.toNonIndexed() : geometry));
+  const text = mergeGeometries(pieces, true);
+  if (!text) throw new Error("Could not combine the colored parts.");
+  text.groups.forEach((group, index) => {
+    group.materialIndex = colored[index].slot;
+  });
+  text.userData.lineSlots = true;
+  text.userData.slotColors = palette;
+  const warnings = [
+    layout.lid.length
+      ? `Needs ${layout.keys.length} Cherry MX-compatible switch${layout.keys.length > 1 ? "es" : ""}. Print the base, the lid (colors up), and the caps (the download lays them top face down) with no supports. Push each switch into the base, glue the lid into the rim, then press each cap onto its stem through its hole.`
+      : "Needs 1 Cherry MX-compatible switch. The download lays the cap picture face down, so print the base and the cap with no supports. Push the switch into the base, then press the cap onto its stem inside the rim.",
+  ];
+  return pack(text, fuse(bodies), warnings);
+}
+
+function polygonShapes(polygons: Polygon[]) {
+  return polygons
+    .filter((polygon) => polygon[0]?.length >= 3)
+    .map((polygon) => {
+      const shape = new THREE.Shape(polygon[0].map((point) => new THREE.Vector2(point.x, point.y)));
+      shape.holes = polygon.slice(1).map((ring) => new THREE.Path(ring.map((point) => new THREE.Vector2(point.x, point.y))));
+      return shape;
+    });
+}
+
+// Keyring loop off a housing end at x = 0 that faces -x, lying flat on the bed.
+function clickerLoop(style: LoopStyle, hole: number, fine: number) {
   const depth = 5;
   const solid = (shapes: THREE.Shape[]) => extrudeShapes(shapes, depth, fine);
   const bore = (x: number, y: number) => {
@@ -892,15 +1186,6 @@ function clickerLoop(style: LoopStyle, hole: number, back: number, fine: number)
       const center = -(outer * 0.8 + 1);
       return [solid([star]).translate(center, 0, 0), neck(center + hole + 0.6, 4)];
     }
-    case "corner": {
-      // Eye out past the back corner, its bar running diagonally into the corner.
-      const reach = hole + 6.5;
-      const cornerX = 3;
-      const cornerY = back * (CLICKER.unit / 2 - 3);
-      const tab = solid([noseBar(reach + 1, hole + 2.5, hole)]);
-      tab.rotateZ((back * 3 * Math.PI) / 4);
-      return [tab.translate(cornerX - reach * Math.SQRT1_2, cornerY + back * reach * Math.SQRT1_2, 0)];
-    }
     default: {
       const tab = solid([noseBar(hole + 4, hole + 2.5, hole)]);
       return [tab.rotateZ(Math.PI).translate(-(hole + 2), 0, 0)];
@@ -935,53 +1220,41 @@ function capIcon(id: string, target: number, depth: number) {
 
 // Keycap standing on its open side: a skirt around the switch, a cross socket for the
 // stem, and a rounded top. The socket post reaches the bed, so nothing hangs in the air.
-function keycap(fine: number, corner: number) {
+function keycap(outline: Pt[], fine: number, corner: number, pattern: SurfacePattern, spacing: number) {
   const k = CLICKER;
-  const half = k.cap / 2;
-  const radius = 2.4;
   const bevel = (k.cap - k.capTop) / 2;
   const steps = 8;
-  const outer: { z: number; inset: number }[] = [{ z: 0, inset: 0 }];
+  const shoulder = k.capHeight - bevel;
+  const outer: { z: number; inset: number }[] = (pattern === "plain" ? [0] : levels(0, shoulder, spacing).slice(0, -1)).map(
+    (z) => ({ z, inset: 0 }),
+  );
   for (let step = 0; step <= steps; step += 1) {
     const angle = (step / steps) * (Math.PI / 2);
-    outer.push({ z: k.capHeight - bevel + bevel * Math.sin(angle), inset: bevel * (1 - Math.cos(angle)) });
+    outer.push({ z: shoulder + bevel * Math.sin(angle), inset: bevel * (1 - Math.cos(angle)) });
   }
-  const ring = (inset: number, r: number, z: number) => squareRing(half - inset, Math.max(0.3, r - inset), corner, z);
-  const shell = outer.map((level) => ring(level.inset, radius, level.z));
-  const innerHalf = half - k.skirtWall;
-  const innerBottom = squareRing(innerHalf, 1.4, corner, 0);
-  const innerTop = squareRing(innerHalf, 1.4, corner, k.socket);
+  // Engraved into the solid band above the switch socket; the skirt below is only 1 mm.
+  const low = k.socket + 0.4;
+  const high = shoulder - 0.3;
+  const push = (s: number, z: number, around: number) =>
+    -CAP_RELIEF * patternHeight(pattern, s, z, around) * smoothstep(low, low + 0.5, z) * (1 - smoothstep(high - 0.5, high, z));
+  const samples = sampleOutline(outline, spacing);
+  const shell = outer.map((level) => ringAt(samples, level.z, level.inset ? () => -level.inset : push));
+  const innerSize = k.cap - 2 * k.skirtWall;
+  const innerBottom = squareRing(0, 0, innerSize, 1.4, corner, 0);
+  const innerTop = squareRing(0, 0, innerSize, 1.4, corner, k.socket);
 
   const parts = [
     loft(shell, false),
     loft([innerBottom, innerTop], true),
     capFace(shell[shell.length - 1], 1),
     capFace(innerTop, -1),
-    bandFace(shell[0], innerBottom),
+    holedFace(shell[0], [innerBottom], -1),
   ];
 
   const post = disk(k.post);
   post.holes.push(crossPath(k.crossLength, k.crossWidth));
   parts.push(extrudeShapes([post], k.socket + 0.3, fine));
   return parts;
-}
-
-// Rounded square ring, counterclockwise, with the same point count for any size.
-function squareRing(half: number, radius: number, corner: number, z: number) {
-  const points: THREE.Vector3[] = [];
-  const centers = [
-    [half - radius, half - radius],
-    [-(half - radius), half - radius],
-    [-(half - radius), -(half - radius)],
-    [half - radius, -(half - radius)],
-  ];
-  centers.forEach(([cx, cy], index) => {
-    for (let step = 0; step <= corner; step += 1) {
-      const angle = (index + step / corner) * (Math.PI / 2);
-      points.push(new THREE.Vector3(cx + Math.cos(angle) * radius, cy + Math.sin(angle) * radius, z));
-    }
-  });
-  return points;
 }
 
 function surface(positions: number[], indices: number[]) {
@@ -1013,24 +1286,7 @@ function loft(rings: THREE.Vector3[][], inward: boolean) {
 function capFace(points: THREE.Vector3[], facing: 1 | -1) {
   const contour = points.map((point) => new THREE.Vector2(point.x, point.y));
   const triangles = THREE.ShapeUtils.triangulateShape(contour, []);
-  const indices = triangles.flatMap(([a, b, c]) => {
-    const [p, q, r] = [contour[a], contour[b], contour[c]];
-    const up = (q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x) > 0;
-    return up === (facing === 1) ? [a, b, c] : [a, c, b];
-  });
-  return surface(points.flatMap((point) => [point.x, point.y, point.z]), indices);
-}
-
-// Flat ring between two matching rings at the same height, facing down.
-function bandFace(outer: THREE.Vector3[], inner: THREE.Vector3[]) {
-  const count = outer.length;
-  const positions = [...outer, ...inner].flatMap((point) => [point.x, point.y, point.z]);
-  const indices: number[] = [];
-  for (let index = 0; index < count; index += 1) {
-    const next = (index + 1) % count;
-    indices.push(index, count + next, next, index, count + index, count + next);
-  }
-  return surface(positions, indices);
+  return surface(points.flatMap((point) => [point.x, point.y, point.z]), facedUp(contour, triangles, facing));
 }
 
 function crossPath(length: number, width: number) {

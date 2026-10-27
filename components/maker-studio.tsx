@@ -6,7 +6,9 @@ import { ensureCharmArt } from "@/lib/charms";
 import { FontField } from "@/components/font-field";
 import { Viewer } from "@/components/viewer";
 import { CostEstimate } from "@/components/cost-estimate";
-import { LOOP_STYLES, productBySlug, TAG_GROUPS, type ProductSettings, type TagShape } from "@/lib/catalog";
+import { HousingField } from "@/components/housing-field";
+import { partsMode } from "@/lib/clicker-layout";
+import { LOOP_STYLES, productBySlug, SURFACE_PATTERNS, TAG_GROUPS, type ProductSettings, type TagShape } from "@/lib/catalog";
 import { downloadBlob, EXPORT_FORMATS, exportKeychain, slugify, type ExportFormat } from "@/lib/export";
 import { useFontLibrary } from "@/lib/font-library";
 import { LIMITS, MAX_CHARMS, withCharm, type KeychainModel } from "@/lib/geometry";
@@ -62,7 +64,7 @@ export function MakerStudio({ slug }: { slug: string }) {
     let cancel = false;
     const attempt = spotifyAttempt.current;
     const timer = window.setTimeout(() => {
-      if (needsText && !current.text.trim() && !current.charms.length) {
+      if (needsText && !current.text.trim() && !current.charms.length && !partsMode(current)) {
         if (!cancel) {
           setError(null);
           setBuilding(false);
@@ -73,7 +75,7 @@ export function MakerStudio({ slug }: { slug: string }) {
       void (async () => {
         try {
           const font = needsFont ? await fonts.load(current.fontId) : null;
-          await Promise.all(current.charms.map((charm) => ensureCharmArt(charm.id)));
+          await Promise.all([...current.charms.map((charm) => charm.id), current.housingLogo].map(ensureCharmArt));
           if (cancel) return;
           const next = buildProduct(product.slug, font, current, "preview");
           if (cancel) {
@@ -165,11 +167,11 @@ export function MakerStudio({ slug }: { slug: string }) {
   }
 
   async function onDownload() {
-    if (needsText && !current.text.trim() && !current.charms.length) return;
+    if (needsText && !current.text.trim() && !current.charms.length && !partsMode(current)) return;
     setExporting(true);
     try {
       const font = needsFont ? await fonts.load(current.fontId) : null;
-      await Promise.all(current.charms.map((charm) => ensureCharmArt(charm.id)));
+      await Promise.all([...current.charms.map((charm) => charm.id), current.housingLogo].map(ensureCharmArt));
       const printModel = buildProduct(active.slug, font, current, "print");
       try {
         const file = await exportKeychain(
@@ -275,7 +277,7 @@ export function MakerStudio({ slug }: { slug: string }) {
               <button
                 type="button"
                 onClick={() => void onDownload()}
-                disabled={exporting || (needsText && !settings.text.trim() && !settings.charms.length)}
+                disabled={exporting || (needsText && !settings.text.trim() && !settings.charms.length && !partsMode(settings))}
                 className="inline-flex h-10 items-center gap-2 rounded-lg bg-[#2f80ed] px-4 text-sm font-medium text-white shadow-sm hover:bg-[#1f6fd6] disabled:cursor-wait disabled:opacity-70"
               >
                 {exporting ? "Preparing…" : `Download ${format.toUpperCase()}`}
@@ -391,6 +393,49 @@ export function MakerStudio({ slug }: { slug: string }) {
                   Tiles are plates with a raised letter. Blocks are the letters themselves, joined by a bar through a round hole so each letter can pivot. Letter distance sets the space between letters.
                 </span>
               </label>
+            );
+          }
+          if (field.type === "housing") {
+            return (
+              <HousingField key="housing" slug={slug} label={field.label} settings={settings} patch={patch} onError={setError} />
+            );
+          }
+          if (field.type === "surface") {
+            return (
+              <div key="surface" className="mb-3 text-sm text-zinc-600">
+                <label htmlFor={`${slug}-surface`}>{field.label}</label>
+                <div className="mt-1 flex gap-2">
+                  <select
+                    id={`${slug}-surface`}
+                    value={settings.surface}
+                    onChange={(event) => patch({ surface: event.target.value as ProductSettings["surface"] })}
+                    className="h-10 min-w-0 flex-1 rounded-lg border border-[#e6e7ec] bg-[#fafafa] px-2 text-sm"
+                  >
+                    {SURFACE_PATTERNS.map((pattern) => (
+                      <option key={pattern.value} value={pattern.value}>
+                        {pattern.label}
+                      </option>
+                    ))}
+                  </select>
+                  {settings.surface !== "plain" && (
+                    <select
+                      aria-label="Pattern on"
+                      value={settings.surfaceOn}
+                      onChange={(event) => patch({ surfaceOn: event.target.value as ProductSettings["surfaceOn"] })}
+                      className="h-10 w-36 rounded-lg border border-[#e6e7ec] bg-[#fafafa] px-2 text-sm"
+                    >
+                      <option value="both">Housing &amp; caps</option>
+                      <option value="housing">Housing only</option>
+                      <option value="caps">Caps only</option>
+                    </select>
+                  )}
+                </div>
+                {settings.surface !== "plain" && (
+                  <span className="mt-1 block text-xs text-zinc-400">
+                    Raised on the housing sides, engraved around the keycaps so they still slide freely.
+                  </span>
+                )}
+              </div>
             );
           }
           if (field.type === "loop-style") {
