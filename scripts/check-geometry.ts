@@ -21,13 +21,24 @@ class NodeFileReader {
 globalThis.FileReader = NodeFileReader as unknown as typeof FileReader;
 import opentype from "opentype.js";
 import { unzipSync } from "fflate";
-import type * as THREE from "three";
+import * as THREE from "three";
 import { LOOP_STYLES, PRODUCTS, SURFACE_PATTERNS } from "../lib/catalog";
 import { registerLogo } from "../lib/charms";
 import { bounds, clickerLayout, clickerLayoutInput, HOUSING_SHAPES, partsLayout } from "../lib/clicker-layout";
 import { registerImageParts } from "../lib/image-parts";
-import { buildKeychain } from "../lib/geometry";
+import { buildKeychain, disposeModel } from "../lib/geometry";
 import { exportKeychain } from "../lib/export";
+import { drilled as drilledSolid, ensureManifold, manifoldKernel } from "../lib/manifold";
+import {
+  clickerPlan,
+  CUT,
+  ensureSampleModel,
+  registerModel,
+  SAMPLE_MODEL,
+  smallestSize,
+  switchArea,
+  tunnelPoint,
+} from "../lib/model-import";
 import {
   assertArticulatedHingeRound,
   assertBlockChain,
@@ -95,6 +106,7 @@ if (holeless.width >= model.width - 1) {
 }
 
 async function main() {
+  await ensureManifold();
   const exported = await exportKeychain(model, "3mf", "#f4f4f5", "#8d79f6", "paul");
   const bytes = new Uint8Array(await exported.blob.arrayBuffer());
   const unzipped = unzipSync(bytes);
@@ -150,6 +162,7 @@ async function main() {
   assertBlockChain();
   assertFlexi();
   assertClicker();
+  await assertModelClicker();
 
   model.text.dispose();
   model.base.dispose();
@@ -214,6 +227,138 @@ function openEdges(geometry: THREE.BufferGeometry) {
     if ((edges.get(`${b}>${a}`) ?? 0) !== count) open += 1;
   }
   return open;
+}
+
+async function assertModelClicker() {
+  const product = PRODUCTS.find((entry) => entry.slug === "model-clicker");
+  if (!product) throw new Error("3D clicker is missing from the catalog");
+  const k = CLICKER;
+  // The switch holds the cap up by the travel gap, with its stem top (11.6 mm over the plate,
+  // as in the other clickers) at the socket's ceiling. Pressed 4 mm, the cap stops short of
+  // the housing and the pocket floor, its hollow clears the switch top, and the plug stays in.
+  if (CUT.travel < 4.2) throw new Error("3D clicker cap hits the housing before the switch bottoms out");
+  const stemTop = 11.6;
+  if (Math.abs(CUT.plug + CUT.travel + CUT.ceiling - 0.3 - stemTop) > 0.05) {
+    throw new Error("3D clicker socket doesn't meet the stem with the cap up");
+  }
+  if (CUT.travel + CUT.plug + CUT.ceiling - 4 < 6.6 + 0.4) throw new Error("3D clicker cap hollow hits the switch top when pressed");
+  if (CUT.plug - CUT.travel < 2) throw new Error("3D clicker plug slips out of the pocket with the cap up");
+  if (CUT.hollow < 15.6 + 0.6) throw new Error("3D clicker cap hollow rubs the switch housing");
+  if (CUT.base < k.floor + k.below + k.plate) throw new Error("3D clicker housing is too shallow for the switch pins");
+
+  ensureSampleModel();
+  const least = smallestSize(SAMPLE_MODEL);
+  if (!least || least < 20 || least > 120) throw new Error(`3D clicker sample's smallest size is ${least} mm`);
+  const tooSmall = clickerPlan(SAMPLE_MODEL, least / 2, 0, null);
+  if (tooSmall.size !== least) throw new Error("3D clicker object shrank below the switch");
+  const plan = clickerPlan(SAMPLE_MODEL, product.settings.housingSize, 0, null);
+  if (!plan.cuts.includes(plan.cut)) throw new Error("3D clicker picked a cut the switch doesn't fit");
+  const far = clickerPlan(SAMPLE_MODEL, product.settings.housingSize, 0, { x: 400, y: 400 });
+  const farCell = Math.hypot(far.at.x - 400 * far.scale, far.at.y - 400 * far.scale);
+  if (farCell < 1 || !switchArea(far).length) throw new Error("3D clicker switch was not pulled back inside");
+
+  const cube = new THREE.BoxGeometry(40, 40, 40).toNonIndexed();
+  cube.translate(0, 0, 20);
+  const cubeId = registerModel("Cube", Float32Array.from(cube.getAttribute("position").array));
+  const cubePlan = clickerPlan(cubeId, 40, 0.6, null);
+  if (Math.abs(cubePlan.cut - 24) > 1 || Math.abs(cubePlan.at.x) > 1 || Math.abs(cubePlan.at.y) > 1) {
+    throw new Error(`3D clicker cube cut ${cubePlan.cut.toFixed(1)} mm with the switch at ${cubePlan.at.x.toFixed(1)}, ${cubePlan.at.y.toFixed(1)}`);
+  }
+
+  await ensureManifold();
+  const settings = { ...product.settings, modelId: cubeId, housingSize: 40, modelCut: 0.6 };
+  const print = buildProduct("model-clicker", null, settings, "print");
+  for (const [name, geometry] of [["object", print.text], ["borders", print.base]] as const) {
+    if (openEdges(geometry)) throw new Error(`3D clicker ${name} is not watertight`);
+  }
+  print.base.computeBoundingBox();
+  const bands = print.base.boundingBox!;
+  if (bands.min.z > 0.01) throw new Error("3D clicker cap border doesn't sit on the bed");
+  if (Math.abs(print.depth - Math.max(cubePlan.cut, 40 - cubePlan.cut + CUT.plug)) > 0.3) {
+    throw new Error(`3D clicker print layout is ${print.depth.toFixed(1)} mm tall`);
+  }
+  const preview = buildProduct("model-clicker", null, settings, "preview");
+  if (!preview.cut || Math.abs(preview.cut.mm - cubePlan.cut) > 0.01) throw new Error("3D clicker preview lost its cut");
+  if (Math.abs(preview.depth - print.depth) > 0.3) throw new Error("3D clicker preview isn't laid out on the bed like the print");
+  const fit = preview.assembly;
+  if (!fit) throw new Error("3D clicker preview has no parts to animate");
+  const housingBox = new THREE.Box3().setFromBufferAttribute(fit.housing.text.getAttribute("position") as THREE.BufferAttribute);
+  const capBox = new THREE.Box3().setFromBufferAttribute(fit.cap.text.getAttribute("position") as THREE.BufferAttribute);
+  const capBorderBox = new THREE.Box3().setFromBufferAttribute(fit.cap.base.getAttribute("position") as THREE.BufferAttribute);
+  if (capBorderBox.min.z > 0.01 || housingBox.min.z > 0.01) throw new Error("3D clicker parts aren't both on the bed");
+  if (capBox.min.x < housingBox.max.x) throw new Error("3D clicker cap overlaps the housing on the bed");
+  const seated = capBorderBox.min.z + fit.offset.z;
+  if (Math.abs(seated - (cubePlan.cut - CUT.plug + CUT.travel)) > 0.01) throw new Error(`3D clicker cap rests at ${seated.toFixed(2)} mm`);
+  const housingTop = new THREE.Box3().setFromBufferAttribute(fit.housing.base.getAttribute("position") as THREE.BufferAttribute).max.z;
+  const capFace = capBorderBox.min.z + CUT.plug + fit.offset.z - fit.press;
+  if (capFace - housingTop < 0.2) throw new Error("3D clicker cap hits the housing before the switch bottoms out");
+  const rimBox = new THREE.Box3().setFromBufferAttribute(fit.housing.base.getAttribute("position") as THREE.BufferAttribute);
+  const capCenter = (capBorderBox.min.x + capBorderBox.max.x) / 2 + fit.offset.x;
+  if (Math.abs(capCenter - (rimBox.min.x + rimBox.max.x) / 2) > 0.5) throw new Error("3D clicker cap doesn't land over the housing");
+  const lower = buildProduct("model-clicker", null, { ...settings, modelCut: 0.48 }, "preview");
+  if (!lower.cut || lower.cut.mm >= preview.cut.mm - 2) throw new Error("3D clicker cut didn't move");
+
+  const holeSettings = { ...settings, housingSize: 70, loopStyle: "object" as const };
+  const holePlan = clickerPlan(cubeId, 70, 0.6, null);
+  const straight = buildProduct("model-clicker", null, { ...holeSettings, modelHoleShape: "straight" }, "print");
+  const drilled = buildProduct("model-clicker", null, holeSettings, "print");
+  for (const built of [straight, drilled]) {
+    if (!built.hole?.axis) throw new Error("3D clicker did not drill the object");
+    if (openEdges(built.text) || openEdges(built.base)) throw new Error("Drilled 3D clicker is not watertight");
+    if (built.warnings.some((warning) => warning.includes("buried") || warning.includes("runs into"))) {
+      throw new Error(`3D clicker hole misplaced: ${built.warnings[0]}`);
+    }
+  }
+  const hole = drilled.hole!;
+  if (hole.radius <= straight.hole!.radius || drilled.text.getAttribute("position").count === straight.text.getAttribute("position").count) {
+    throw new Error("3D clicker curved hole is the same as the straight one");
+  }
+  const onCap = hole.v! * hole.unit! + hole.radius - holeSettings.holeDiameter > holePlan.cut;
+  if (onCap !== drilled.warnings.some((warning) => warning.includes("glue"))) throw new Error("3D clicker glue note doesn't match the hole");
+  const moved = buildProduct(
+    "model-clicker",
+    null,
+    { ...holeSettings, modelHole: { x: hole.u! + 5, y: hole.v! - 2 } },
+    "print",
+  );
+  if (!moved.hole || Math.abs(moved.hole.z! - (hole.z! - 2 * hole.unit!)) > 0.01) {
+    throw new Error("Dragged 3D clicker hole did not move");
+  }
+  // Tipped and turned tunnels: the solid's hole runs where the warnings think it does.
+  const { Manifold } = manifoldKernel();
+  const block = Manifold.cube([200, 200, 200], true);
+  for (const axis of ["x", "y"] as const) {
+    for (const [tilt, turn] of [[0, 0], [90, 0], [45, 120], [150, 300]]) {
+      const tunnel = { axis, u: 7, v: -5, depth: 9, ring: 20, tilt, turn };
+      const bored = drilledSolid(`check:${axis}`, block, { ...tunnel, radius: 2 }, 1000);
+      for (let step = 0; step < 12; step += 1) {
+        const [x, y, z] = tunnelPoint(tunnel, (step / 12) * Math.PI * 2);
+        const probe = Manifold.cube([0.5, 0.5, 0.5], true).translate(x, y, z);
+        const left = bored.intersect(probe);
+        const solid = left.volume();
+        left.delete();
+        probe.delete();
+        if (solid > 0.01) throw new Error(`3D clicker ${axis} tunnel tilted ${tilt}° turned ${turn}° isn't where its math says`);
+      }
+    }
+  }
+  block.delete();
+  const tipped = [
+    { modelHoleTilt: 90, modelHoleTurn: 0 },
+    { modelHoleTilt: 45, modelHoleTurn: 90 },
+  ].map((direction) => buildProduct("model-clicker", null, { ...holeSettings, ...direction }, "print"));
+  for (const built of tipped) {
+    if (openEdges(built.text) || openEdges(built.base)) throw new Error("Tipped 3D clicker tunnel is not watertight");
+    const misplaced = built.warnings.find((warning) => /buried|outside the object/.test(warning));
+    if (misplaced) throw new Error(`Tipped 3D clicker tunnel: ${misplaced}`);
+    if (!built.hole || Math.abs(built.hole.x - hole.x) + Math.abs(built.hole.y - hole.y) + Math.abs(built.hole.z! - hole.z!) < 1) {
+      throw new Error("3D clicker tunnel didn't change direction");
+    }
+  }
+  const sample = buildProduct("model-clicker", null, product.settings, "preview");
+  console.log("model-clicker cube", print.width.toFixed(1), "x", print.height.toFixed(1), "x", print.depth.toFixed(1), "sample from", least, "mm");
+  for (const built of [print, preview, lower, straight, drilled, moved, ...tipped, sample]) disposeModel(built);
+  cube.dispose();
 }
 
 function assertClicker() {

@@ -8,6 +8,7 @@ export function ProductArt({ slug }: { slug: string }) {
   if (slug === "articulated-name") return <ArticulatedArt />;
   if (slug === "flexi-keychain") return <FlexiArt />;
   if (slug === "clicker-keychain") return <ClickerArt />;
+  if (slug === "model-clicker") return <ModelClickerArt />;
   if (slug === "pen-holder") return <PenArt />;
   if (slug === "picture-frame") return <FrameArt />;
   if (slug === "nameplate") return <PlateArt />;
@@ -99,6 +100,26 @@ function ClickerArt() {
           </g>
         );
       })}
+    </Scene>
+  );
+}
+
+function ModelClickerArt() {
+  const star = Array.from({ length: 10 }, (_, index) => {
+    const angle = -Math.PI / 2 + (index / 10) * Math.PI * 2;
+    const radius = index % 2 ? 26 : 58;
+    return `${(160 + Math.cos(angle) * radius).toFixed(1)},${(98 + Math.sin(angle) * radius * 0.82).toFixed(1)}`;
+  }).join(" ");
+  return (
+    <Scene id="model-clicker" from="#eef0f3" to="#dfe3e8">
+      <ellipse cx="160" cy="186" rx="96" ry="22" fill="#c2410c" />
+      <rect x="64" y="150" width="192" height="36" fill="#c2410c" />
+      <ellipse cx="160" cy="150" rx="96" ry="22" fill="#f05a28" />
+      <ellipse cx="160" cy="146" rx="76" ry="15" fill="#fb7a45" />
+      <polygon points={star} fill="#d9a40f" transform="translate(0 8)" />
+      <polygon points={star} fill="#facc15" />
+      <circle cx="160" cy="66" r="7" fill="#eef0f3" />
+      <circle cx="160" cy="44" r="20" fill="none" stroke="#9ca3af" strokeWidth="4" />
     </Scene>
   );
 }

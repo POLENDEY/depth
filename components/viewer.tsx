@@ -1,9 +1,17 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
-import { hasLineColors, LIMITS, textSlotColors, type CharmBox, type CharmPlacement, type KeychainModel } from "@/lib/geometry";
+import {
+  hasLineColors,
+  LIMITS,
+  textSlotColors,
+  type CharmBox,
+  type CharmPlacement,
+  type KeychainModel,
+  type ModelAssembly,
+} from "@/lib/geometry";
 
 type ViewerApi = {
   textMesh: THREE.Mesh;
@@ -13,7 +21,35 @@ type ViewerApi = {
   dimensionGroup: THREE.Group;
   modelRoot: THREE.Group;
   frame: (reset: boolean) => void;
+  // The housing and cap apart, for the fit animation.
+  housingText: THREE.Mesh;
+  housingBase: THREE.Mesh;
+  capText: THREE.Mesh;
+  capBase: THREE.Mesh;
+  capGroup: THREE.Group;
+  fitGroup: THREE.Group;
+  fit: { assembly: ModelAssembly | null; start: number };
 };
+
+// The cap's path in the fit animation (seconds in): up off the bed, over the housing, down
+// onto the switch, then clicking over and over.
+function capPose(time: number, assembly: ModelAssembly, out: THREE.Vector3) {
+  const { offset, press } = assembly;
+  const hover = offset.z + 14;
+  const ease = (value: number) => {
+    const t = Math.min(1, Math.max(0, value));
+    return t * t * (3 - 2 * t);
+  };
+  if (time < 0.8) return out.set(0, 0, hover * ease(time / 0.8));
+  if (time < 2) {
+    const k = ease((time - 0.8) / 1.2);
+    return out.set(offset.x * k, offset.y * k, hover);
+  }
+  if (time < 2.9) return out.set(offset.x, offset.y, hover + (offset.z - hover) * ease((time - 2) / 0.9));
+  const beat = (time - 2.9) % 1.1;
+  const down = beat < 0.16 ? ease(beat / 0.16) : beat < 0.3 ? 1 : beat < 0.5 ? 1 - ease((beat - 0.3) / 0.2) : 0;
+  return out.set(offset.x, offset.y, offset.z - press * down);
+}
 
 type ViewerProps = {
   model: KeychainModel | null;
@@ -25,6 +61,7 @@ type ViewerProps = {
   holeX?: number;
   holeY?: number;
   onHoleMove?: (x: number, y: number) => void;
+  onCutMove?: (mm: number) => void;
   showDimensions?: boolean;
   onToggleDimensions?: () => void;
 };
@@ -37,6 +74,8 @@ type DragInfo = {
   holeX: number;
   holeY: number;
   onHoleMove?: (x: number, y: number) => void;
+  cut: KeychainModel["cut"];
+  onCutMove?: (mm: number) => void;
 };
 
 export function Viewer({
@@ -49,18 +88,21 @@ export function Viewer({
   holeX = 0,
   holeY = 0,
   onHoleMove,
+  onCutMove,
   showDimensions = false,
   onToggleDimensions,
 }: ViewerProps) {
   const hostRef = useRef<HTMLDivElement>(null);
   const apiRef = useRef<ViewerApi | null>(null);
   const lineMatsRef = useRef<THREE.MeshStandardMaterial[]>([]);
+  const [playing, setPlaying] = useState(false);
   const dragRef = useRef<DragInfo>({
     charmBounds: [],
     charms: [],
     hole: null,
     holeX: 0,
     holeY: 0,
+    cut: undefined,
   });
   useEffect(() => {
     dragRef.current = {
@@ -71,8 +113,10 @@ export function Viewer({
       holeX,
       holeY,
       onHoleMove,
+      cut: model?.cut,
+      onCutMove,
     };
-  }, [model, charms, onCharmMove, holeX, holeY, onHoleMove]);
+  }, [model, charms, onCharmMove, holeX, holeY, onHoleMove, onCutMove]);
   useEffect(() => {
     const host = hostRef.current;
     if (!host) return;
@@ -160,6 +204,22 @@ export function Viewer({
     textMesh.visible = false;
     baseMesh.visible = false;
     modelRoot.add(baseMesh, textMesh, dimensionGroup);
+    const partMesh = (material: THREE.Material) => {
+      const mesh = new THREE.Mesh(new THREE.BufferGeometry(), material);
+      mesh.castShadow = true;
+      return mesh;
+    };
+    const housingText = partMesh(textMat);
+    const housingBase = partMesh(baseMat);
+    const capText = partMesh(textMat);
+    const capBase = partMesh(baseMat);
+    const capGroup = new THREE.Group();
+    capGroup.add(capText, capBase);
+    const fitGroup = new THREE.Group();
+    fitGroup.add(housingText, housingBase, capGroup);
+    fitGroup.visible = false;
+    modelRoot.add(fitGroup);
+    const fit = { assembly: null as ModelAssembly | null, start: 0 };
 
     let userMoved = false;
     const framedCenter = new THREE.Vector3();
@@ -220,6 +280,7 @@ export function Viewer({
     resize();
 
     const loop = () => {
+      if (fit.assembly) capPose(performance.now() / 1000 - fit.start, fit.assembly, capGroup.position);
       controls.update();
       renderer.render(scene, camera);
     };
@@ -229,13 +290,28 @@ export function Viewer({
     document.addEventListener("visibilitychange", onVisibility);
     renderer.setAnimationLoop(loop);
 
-    apiRef.current = { textMesh, baseMesh, textMat, baseMat, dimensionGroup, modelRoot, frame };
+    apiRef.current = {
+      textMesh,
+      baseMesh,
+      textMat,
+      baseMat,
+      dimensionGroup,
+      modelRoot,
+      frame,
+      housingText,
+      housingBase,
+      capText,
+      capBase,
+      capGroup,
+      fitGroup,
+      fit,
+    };
 
     const raycaster = new THREE.Raycaster();
     const pointer = new THREE.Vector2();
     const drag = {
       active: false,
-      target: "charm" as "charm" | "hole",
+      target: "charm" as "charm" | "hole" | "cut",
       charmIndex: -1,
       pointerId: -1,
       startLocal: new THREE.Vector3(),
@@ -254,16 +330,33 @@ export function Viewer({
     const onPointerDown = (event: PointerEvent) => {
       if (event.button !== 0 || event.shiftKey || event.altKey || event.ctrlKey || event.metaKey) return;
       const info = dragRef.current;
-      if (!info.onCharmMove && !info.onHoleMove) return;
+      if (fit.assembly) return;
+      if (!info.onCharmMove && !info.onHoleMove && !info.onCutMove) return;
       setPointer(event);
       raycaster.setFromCamera(pointer, camera);
       const hit = raycaster.intersectObjects([textMesh, baseMesh], false)[0];
       if (!hit) return;
       const local = modelRoot.worldToLocal(hit.point.clone());
-      let target: "charm" | "hole" | null = null;
-      if (info.hole && info.onHoleMove) {
-        const reach = info.hole.radius + 1.8;
-        if ((local.x - info.hole.x) ** 2 + (local.y - info.hole.y) ** 2 <= reach ** 2) target = "hole";
+      let target: "charm" | "hole" | "cut" | null = null;
+      const hole = info.hole;
+      if (hole && info.onHoleMove) {
+        const reach = hole.radius + 1.8;
+        const offset = !hole.axis
+          ? (local.x - hole.x) ** 2 + (local.y - hole.y) ** 2
+          : (hole.axis === "x" ? local.y - hole.y : local.x - hole.x) ** 2 + (local.z - (hole.z ?? 0)) ** 2;
+        if (offset <= reach ** 2) target = "hole";
+      }
+      const cut = info.cut;
+      if (
+        !target &&
+        cut &&
+        info.onCutMove &&
+        local.z >= cut.z - 4 &&
+        local.z <= cut.z + 1 &&
+        local.x >= cut.minX - 1 &&
+        local.x <= cut.maxX + 1
+      ) {
+        target = "cut";
       }
       let charmIndex = -1;
       if (!target && info.onCharmMove) {
@@ -289,9 +382,21 @@ export function Viewer({
       drag.pointerId = event.pointerId;
       drag.startLocal.copy(local);
       const charm = info.charms[charmIndex];
-      drag.startX = target === "hole" ? info.holeX : (charm?.x ?? 0);
+      drag.startX = target === "hole" ? info.holeX : target === "cut" ? (cut?.mm ?? 0) : (charm?.x ?? 0);
       drag.startY = target === "hole" ? info.holeY : (charm?.y ?? 0);
-      const normal = new THREE.Vector3(0, 0, 1).transformDirection(modelRoot.matrixWorld);
+      const axis = target === "hole" ? hole?.axis : undefined;
+      const normal = new THREE.Vector3(axis === "x" ? 1 : 0, axis === "y" ? 1 : 0, axis ? 0 : 1).transformDirection(
+        modelRoot.matrixWorld,
+      );
+      if (target === "cut") {
+        // The cut moves up and down, on an upright plane facing the camera.
+        const facing = camera
+          .getWorldDirection(new THREE.Vector3())
+          .transformDirection(modelRoot.matrixWorld.clone().invert());
+        facing.z = 0;
+        if (facing.lengthSq() < 1e-6) facing.set(0, 1, 0);
+        normal.copy(facing.normalize()).transformDirection(modelRoot.matrixWorld);
+      }
       drag.plane.setFromNormalAndCoplanarPoint(normal, hit.point);
       userMoved = true;
       controls.enabled = false;
@@ -309,6 +414,16 @@ export function Viewer({
       const info = dragRef.current;
       const dx = local.x - drag.startLocal.x;
       const dy = local.y - drag.startLocal.y;
+      if (drag.target === "cut") {
+        info.onCutMove?.(drag.startX + local.z - drag.startLocal.z);
+        return;
+      }
+      const hole = info.hole;
+      if (drag.target === "hole" && hole?.axis && hole.unit) {
+        const across = hole.axis === "x" ? dy : dx;
+        info.onHoleMove?.(drag.startX + across / hole.unit, drag.startY + (local.z - drag.startLocal.z) / hole.unit);
+        return;
+      }
       if (drag.target === "hole") {
         info.onHoleMove?.(
           Math.min(120, Math.max(-120, drag.startX + dx)),
@@ -371,9 +486,31 @@ export function Viewer({
     api.baseMesh.geometry = model.base;
     api.textMesh.visible = true;
     api.baseMesh.visible = true;
+    if (model.assembly) {
+      api.housingText.geometry = model.assembly.housing.text;
+      api.housingBase.geometry = model.assembly.housing.base;
+      api.capText.geometry = model.assembly.cap.text;
+      api.capBase.geometry = model.assembly.cap.base;
+    }
     if (showDimensions) addDimensions(api.dimensionGroup, model);
     api.frame(false);
   }, [model, showDimensions]);
+
+  // Playing swaps in the parts apart and moves the cap onto the housing; pausing puts
+  // both back on the bed.
+  const assembly = model?.assembly ?? null;
+  const animating = playing && assembly !== null;
+  useEffect(() => {
+    const api = apiRef.current;
+    if (!api) return;
+    const wasAnimating = api.fit.assembly !== null;
+    api.fit.assembly = animating ? assembly : null;
+    if (animating && !wasAnimating) api.fit.start = performance.now() / 1000;
+    if (!animating) api.capGroup.position.set(0, 0, 0);
+    api.fitGroup.visible = animating;
+    api.textMesh.visible = !animating && model !== null;
+    api.baseMesh.visible = !animating && model !== null;
+  }, [animating, assembly, model]);
 
   const lineColorKey = (lineColors ?? []).join(",");
   useEffect(() => {
@@ -423,6 +560,21 @@ export function Viewer({
       >
         Dimensions {showDimensions ? "On" : "Off"}
       </button>
+      {assembly ? (
+        <button
+          type="button"
+          aria-pressed={animating}
+          aria-label={animating ? "Pause the fit animation" : "Play the fit animation"}
+          title={animating ? "Pause: back on the bed" : "Play: put the cap on the housing and click it"}
+          onClick={() => setPlaying((current) => !current)}
+          className="absolute top-3 right-[15.25rem] z-10 inline-flex items-center gap-1.5 rounded-full border border-[#e6e7ec] bg-white/90 px-3 py-1.5 text-xs font-medium text-zinc-600 shadow-sm backdrop-blur hover:bg-white"
+        >
+          <svg viewBox="0 0 12 12" className="h-3 w-3" fill="currentColor" aria-hidden="true">
+            {animating ? <path d="M2 1.5h3v9H2zM7 1.5h3v9H7z" /> : <path d="M2.5 1.2v9.6L10.5 6z" />}
+          </svg>
+          {animating ? "Pause" : "Play"}
+        </button>
+      ) : null}
     </>
   );
 }

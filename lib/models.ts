@@ -14,6 +14,19 @@ import {
   type Polygon,
   type Pt,
 } from "./clicker-layout";
+import { drilled, manifoldKernel, modelSolid, solidPositions, type Solid } from "./manifold";
+import {
+  autoHole,
+  bottomOutline,
+  clickerPlan,
+  CUT,
+  ensureSampleModel,
+  SAMPLE_MODEL,
+  tunnelDepth,
+  tunnelPoint,
+  tunnelReach,
+  type Tunnel,
+} from "./model-import";
 import { decodeSpotifyBars, spotifyLogoLoops, type SpotifyPoint } from "./spotify-code";
 import { familiarParts, type TagPoint } from "./tag-shapes";
 import {
@@ -51,6 +64,8 @@ export function buildProduct(
       return flexiKeychain(requiredFont(font), settings, quality);
     case "clicker-keychain":
       return clickerKeychain(requiredFont(font), settings, quality);
+    case "model-clicker":
+      return modelClicker(settings, quality);
     case "pen-holder":
       return penHolder(requiredFont(font), settings, quality, curve);
     case "picture-frame":
@@ -1125,6 +1140,197 @@ function partsClicker(settings: ProductSettings, quality: MeshQuality) {
       : "Needs 1 Cherry MX-compatible switch. The download lays the cap picture face down, so print the base and the cap with no supports. Push the switch into the base, then press the cap onto its stem inside the rim.",
   ];
   return pack(text, fuse(bodies), warnings);
+}
+
+// Position-only copy with fresh normals, so solids and extruded parts merge together.
+function plainGeometry(positions: Float32Array) {
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+  geometry.computeVertexNormals();
+  return geometry;
+}
+
+// An uploaded model cut flat in two: the top is the cap and the bottom the housing, with a
+// switch hidden inside and housing-colored bands on both sides of the cut.
+function modelClicker(settings: ProductSettings, quality: MeshQuality) {
+  ensureSampleModel();
+  const id = settings.modelId || SAMPLE_MODEL;
+  const plan = clickerPlan(id, settings.housingSize, settings.modelCut, settings.modelSwitch);
+  const { model, scale, cut, plate, at } = plan;
+  const { Manifold } = manifoldKernel();
+  const k = CLICKER;
+  const preview = quality === "preview";
+  const fine = preview ? 24 : 48;
+  const holeRadius = clamp(settings.holeDiameter, 3, 6) / 2;
+  const throughObject = settings.loopStyle === "object";
+  const warnings: string[] = [];
+  const temps: { delete(): void }[] = [];
+  const keep = <T extends { delete(): void }>(item: T) => {
+    temps.push(item);
+    return item;
+  };
+  try {
+    let solid = modelSolid(id, model.positions, preview);
+    // The switch and its hollows span these heights (model units); a ring hole there would
+    // break into them.
+    const busy: [number, number] = [(plate - k.plate - k.below - 1) / scale, (cut + CUT.ceiling + CUT.capWall + 1) / scale];
+    let spot: { u: number; v: number } | null = null;
+    let tunnel: Tunnel | null = null;
+    const curved = settings.modelHoleShape !== "straight";
+    // The curved tunnel's radius: its tube plus a bridge of material over it.
+    const ring = holeRadius + 4.4;
+    if (throughObject) {
+      const radius = holeRadius / scale;
+      const auto = autoHole(model, (holeRadius + (curved ? 2.4 : 1.6)) / scale, busy);
+      spot = settings.modelHole ? { u: settings.modelHole.x, v: settings.modelHole.y } : auto;
+      if (!settings.modelHole && !auto.fits) {
+        warnings.push("The object is thin everywhere, so the ring hole has little material around it. Make it bigger or use a loop on the housing.");
+      }
+      let low = spot.v;
+      let high = spot.v;
+      if (curved) {
+        tunnel = {
+          axis: model.side.axis,
+          u: spot.u,
+          v: spot.v,
+          ring: ring / scale,
+          tilt: settings.modelHoleTilt,
+          turn: settings.modelHoleTurn,
+        };
+        tunnel.depth = tunnelDepth(model, tunnel, (holeRadius + 2.4) / scale);
+        const reach = tunnelReach(model, tunnel);
+        ({ low, high } = reach);
+        if (reach.share > 0.97) {
+          warnings.push("The curved hole is buried inside the object, so it never comes out. Drag it to an edge or change its direction.");
+        } else if (reach.share < 0.15) {
+          warnings.push("The curved hole is mostly outside the object, so there's little bridge to hang from. Drag it further in or change its direction.");
+        }
+      }
+      if (high + radius > busy[0] && low - radius < busy[1]) {
+        warnings.push("The ring hole runs into the switch inside. Drag it higher or lower.");
+      }
+      solid = drilled(
+        `${id}:${preview}`,
+        solid,
+        tunnel ? { ...tunnel, radius } : { axis: model.side.axis, u: spot.u, v: spot.v, radius },
+        1000,
+      );
+    }
+    const body = keep(solid.scale(scale));
+    const box = (width: number, depth: number, height: number, z: number) =>
+      keep(Manifold.cube([width, depth, height], true).translate(at.x, at.y, z + height / 2));
+
+    // The pocket fits inside every slice from the plate up to the cut, a wall in from the surface.
+    let region = keep(body.slice(cut - 0.05));
+    for (let step = 0; step < 5; step += 1) {
+      region = keep(region.intersect(keep(body.slice(plate + 0.05 + ((cut - plate - 0.1) * step) / 5))));
+    }
+    const inner = keep(region.offset(-CUT.wall, "Round", 2, fine));
+    const plug = keep(inner.offset(-CUT.gap, "Round", 2, fine));
+
+    const housing = keep(
+      Manifold.difference([
+        keep(body.trimByPlane([0, 0, -1], -cut)),
+        keep(inner.extrude(cut - plate + 1).translate(0, 0, plate)),
+        box(k.cutout, k.cutout, k.plate + 0.02, plate - k.plate - 0.01),
+        box(k.cavity, k.cavity, k.below + 0.01, plate - k.plate - k.below),
+      ]),
+    );
+    // The cap's hollow clears the switch top as it presses down; the socket post hangs in it.
+    const postBottom = cut + CUT.ceiling - k.socket - 0.3;
+    const crossBar = (width: number, depth: number) =>
+      keep(Manifold.cube([width, depth, k.socket + 0.01], true).translate(at.x, at.y, postBottom - 0.01 + (k.socket + 0.01) / 2));
+    const shell = keep(
+      Manifold.difference([
+        keep(Manifold.union([keep(body.trimByPlane([0, 0, 1], cut)), keep(plug.extrude(CUT.plug + 0.01).translate(0, 0, cut - CUT.plug))])),
+        box(CUT.hollow, CUT.hollow, CUT.ceiling + CUT.plug + 0.01, cut - CUT.plug - 0.01),
+      ]),
+    );
+    const post = keep(Manifold.cylinder(k.socket + 0.31, k.post, k.post, fine).translate(at.x, at.y, postBottom));
+    const cap = keep(
+      Manifold.difference([keep(Manifold.union([shell, post])), crossBar(k.crossLength, k.crossWidth), crossBar(k.crossWidth, k.crossLength)]),
+    );
+    if (housing.isEmpty() || cap.isEmpty()) throw new Error("Could not cut that model. Try another cut height.");
+
+    // Below and above a height, for the housing-colored bands.
+    const below = (part: Solid, z: number) => keep(part.trimByPlane([0, 0, -1], -z));
+    const above = (part: Solid, z: number) => keep(part.trimByPlane([0, 0, 1], z));
+    const housingBox = housing.boundingBox();
+    const capBox = cap.boundingBox();
+    // Side by side on the bed, each on its flat bottom.
+    const capShift = { x: housingBox.max[0] + 6 - capBox.min[0], z: -(cut - CUT.plug) };
+    const place = (part: Solid, onCap: boolean) => {
+      const geometry = plainGeometry(solidPositions(part));
+      if (onCap) geometry.translate(capShift.x, 0, capShift.z);
+      return geometry;
+    };
+    const housingBody = [place(below(housing, cut - CUT.rim), false)];
+    const housingRim = [place(above(housing, cut - CUT.rim), false)];
+    const capBody = [place(above(cap, cut + CUT.border), true)];
+    const capBorder = [place(below(cap, cut + CUT.border), true)];
+    if (!throughObject && settings.loopStyle !== "none") {
+      const outline = bottomOutline(plan);
+      if (outline.length >= 3) {
+        for (const loop of placedLoop(settings, outline, holeRadius, fine)) {
+          const flat = loop.index ? loop.toNonIndexed() : loop;
+          housingBody.push(plainGeometry(Float32Array.from(flat.getAttribute("position").array)));
+          flat.dispose();
+          loop.dispose();
+        }
+      }
+    }
+    const copy = (parts: THREE.BufferGeometry[]) => fuse(parts.map((part) => part.clone()));
+    const apart = preview
+      ? { housing: { text: copy(housingBody), base: copy(housingRim) }, cap: { text: copy(capBody), base: copy(capBorder) } }
+      : null;
+    const text = fuse([...housingBody, ...capBody]);
+    const base = fuse([...housingRim, ...capBorder]);
+
+    // Where the hole is grabbed: a straight bore's axis, or the middle of a curved tunnel.
+    const [holeX, holeY, holeZ] = tunnel
+      ? tunnelPoint(tunnel, Infinity)
+      : spot
+        ? model.side.axis === "x"
+          ? [0, spot.u, spot.v]
+          : [spot.u, 0, spot.v]
+        : [0, 0, 0];
+    const holeOnCap = spot !== null && holeZ * scale > cut;
+    warnings.push(
+      `Needs 1 Cherry MX-compatible switch. Print the housing on its bottom and the cap on its plug, with supports under any overhangs. Push the switch into the housing's pocket, then press the cap's socket onto the stem: the cap rests ${CUT.travel} mm up and clicks down to meet the housing.${holeOnCap ? " The keyring pulls on the cap, so glue the cap onto the stem." : ""}`,
+    );
+    text.computeBoundingBox();
+    base.computeBoundingBox();
+    const all = text.boundingBox!.clone().union(base.boundingBox!);
+    const packed = pack(text, base, warnings);
+    const cx = (all.min.x + all.max.x) / 2;
+    const cy = (all.min.y + all.max.y) / 2;
+    if (spot) {
+      const lift = holeOnCap ? capShift.z : 0;
+      const shift = holeOnCap ? capShift.x : 0;
+      // A curved tunnel is grabbed anywhere around its ring.
+      packed.hole = {
+        x: holeX * scale + shift - cx,
+        y: holeY * scale - cy,
+        z: holeZ * scale + lift - all.min.z,
+        radius: curved ? ring + holeRadius : holeRadius,
+        axis: model.side.axis,
+        unit: scale,
+        u: spot.u,
+        v: spot.v,
+      };
+    }
+    if (apart) {
+      for (const geometry of [apart.housing.text, apart.housing.base, apart.cap.text, apart.cap.base]) {
+        geometry.translate(-cx, -cy, -all.min.z);
+      }
+      packed.cut = { z: cut - all.min.z, minX: housingBox.min[0] - cx, maxX: housingBox.max[0] - cx, mm: cut, height: plan.height };
+      // Assembled, the switch holds the cap up by the travel gap; a full press closes all but 0.3 mm.
+      packed.assembly = { ...apart, offset: { x: -capShift.x, y: 0, z: -capShift.z + CUT.travel }, press: 4 };
+    }
+    return packed;
+  } finally {
+    for (const item of temps) item.delete();
+  }
 }
 
 function polygonShapes(polygons: Polygon[]) {

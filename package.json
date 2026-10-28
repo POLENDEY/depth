@@ -6,11 +6,13 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "postinstall": "node -e \"require('fs').copyFileSync('node_modules/manifold-3d/manifold.wasm','public/manifold.wasm')\""
   },
   "dependencies": {
     "clipper-lib": "^6.4.2",
     "fflate": "^0.8.3",
+    "manifold-3d": "3.5.4",
     "next": "16.3.8",
     "opentype.js": "^2.0.0",
     "react": "19.2.8",

@@ -7,11 +7,13 @@ import { FontField } from "@/components/font-field";
 import { Viewer } from "@/components/viewer";
 import { CostEstimate } from "@/components/cost-estimate";
 import { HousingField } from "@/components/housing-field";
+import { ModelField } from "@/components/model-field";
+import { ensureManifold } from "@/lib/manifold";
 import { partsMode } from "@/lib/clicker-layout";
 import { LOOP_STYLES, productBySlug, SURFACE_PATTERNS, TAG_GROUPS, type ProductSettings, type TagShape } from "@/lib/catalog";
 import { downloadBlob, EXPORT_FORMATS, exportKeychain, slugify, type ExportFormat } from "@/lib/export";
 import { useFontLibrary } from "@/lib/font-library";
-import { LIMITS, MAX_CHARMS, withCharm, type KeychainModel } from "@/lib/geometry";
+import { disposeModel, LIMITS, MAX_CHARMS, withCharm, type KeychainModel } from "@/lib/geometry";
 import {
   importLogo,
   LOGO_EDGES,
@@ -48,14 +50,12 @@ export function MakerStudio({ slug }: { slug: string }) {
 
   const needsText = product?.fields.some((field) => field.type === "text") ?? false;
   const needsFont = product?.fields.some((field) => field.type === "font") ?? false;
+  const isModel = slug === "model-clicker";
   const geometryKey = useMemo(() => JSON.stringify({ slug, settings }), [slug, settings]);
 
   useEffect(() => {
     if (!model) return;
-    return () => {
-      model.text.dispose();
-      model.base.dispose();
-    };
+    return () => disposeModel(model);
   }, [model]);
 
   useEffect(() => {
@@ -76,11 +76,11 @@ export function MakerStudio({ slug }: { slug: string }) {
         try {
           const font = needsFont ? await fonts.load(current.fontId) : null;
           await Promise.all([...current.charms.map((charm) => charm.id), current.housingLogo].map(ensureCharmArt));
+          if (product.slug === "model-clicker") await ensureManifold();
           if (cancel) return;
           const next = buildProduct(product.slug, font, current, "preview");
           if (cancel) {
-            next.text.dispose();
-            next.base.dispose();
+            disposeModel(next);
             return;
           }
           setModel(next);
@@ -172,6 +172,7 @@ export function MakerStudio({ slug }: { slug: string }) {
     try {
       const font = needsFont ? await fonts.load(current.fontId) : null;
       await Promise.all([...current.charms.map((charm) => charm.id), current.housingLogo].map(ensureCharmArt));
+      if (active.slug === "model-clicker") await ensureManifold();
       const printModel = buildProduct(active.slug, font, current, "print");
       try {
         const file = await exportKeychain(
@@ -184,8 +185,7 @@ export function MakerStudio({ slug }: { slug: string }) {
         );
         downloadBlob(file.blob, file.filename);
       } finally {
-        printModel.text.dispose();
-        printModel.base.dispose();
+        disposeModel(printModel);
       }
       setError(null);
     } catch (reason) {
@@ -244,6 +244,17 @@ export function MakerStudio({ slug }: { slug: string }) {
                   }
                 : undefined
             }
+            holeX={settings.modelHole?.x ?? visible?.hole?.u ?? 0}
+            holeY={settings.modelHole?.y ?? visible?.hole?.v ?? 0}
+            onHoleMove={isModel && visible?.hole?.axis ? (x, y) => patch({ modelHole: { x, y } }) : undefined}
+            onCutMove={
+              isModel && visible?.cut
+                ? (mm) => {
+                    const cut = visible.cut!;
+                    patch({ modelCut: Math.min(1, Math.max(0.01, mm / cut.height)) });
+                  }
+                : undefined
+            }
           />
           <div className="pointer-events-none absolute inset-x-0 bottom-0 flex flex-col gap-2 p-3 sm:flex-row sm:items-end sm:justify-between">
             <div className="rounded-xl bg-white/85 px-3 py-2 text-sm text-zinc-600 shadow-sm backdrop-blur">
@@ -254,6 +265,8 @@ export function MakerStudio({ slug }: { slug: string }) {
               <p className="text-xs text-zinc-400">
                 {slug === "magnet" && settings.charms.length
                   ? "Drag an emoji to move it · Drag empty space to orbit"
+                  : isModel
+                  ? `Drag the cut${visible?.hole?.axis ? " or the ring hole" : ""} to move it · Drag elsewhere to orbit`
                   : "Drag to orbit · Shift+drag to pan · Scroll to zoom"}
               </p>
             </div>
@@ -400,6 +413,9 @@ export function MakerStudio({ slug }: { slug: string }) {
               <HousingField key="housing" slug={slug} label={field.label} settings={settings} patch={patch} onError={setError} />
             );
           }
+          if (field.type === "model") {
+            return <ModelField key="model" slug={slug} label={field.label} settings={settings} patch={patch} onError={setError} />;
+          }
           if (field.type === "surface") {
             return (
               <div key="surface" className="mb-3 text-sm text-zinc-600">
@@ -449,13 +465,26 @@ export function MakerStudio({ slug }: { slug: string }) {
                     onChange={(event) => patch({ loopStyle: event.target.value as ProductSettings["loopStyle"] })}
                     className="h-10 min-w-0 flex-1 rounded-lg border border-[#e6e7ec] bg-[#fafafa] px-2 text-sm"
                   >
-                    {LOOP_STYLES.map((style) => (
+                    {LOOP_STYLES.filter((style) => style.value !== "object" || isModel).map((style) => (
                       <option key={style.value} value={style.value}>
                         {style.label}
                       </option>
                     ))}
                   </select>
-                  {settings.loopStyle !== "none" && (
+                  {settings.loopStyle === "object" && (
+                    <select
+                      aria-label="Hole shape"
+                      value={settings.modelHoleShape}
+                      onChange={(event) =>
+                        patch({ modelHoleShape: event.target.value as ProductSettings["modelHoleShape"], modelHole: null })
+                      }
+                      className="h-10 w-32 rounded-lg border border-[#e6e7ec] bg-[#fafafa] px-2 text-sm"
+                    >
+                      <option value="torus">Curved (torus)</option>
+                      <option value="straight">Straight</option>
+                    </select>
+                  )}
+                  {settings.loopStyle !== "none" && settings.loopStyle !== "object" && (
                     <select
                       aria-label="Hole side"
                       value={settings.loopSide}
@@ -467,6 +496,57 @@ export function MakerStudio({ slug }: { slug: string }) {
                     </select>
                   )}
                 </div>
+                {settings.loopStyle === "object" && settings.modelHoleShape !== "straight" && (
+                  <div className="mt-2 grid gap-2">
+                    {(
+                      [
+                        {
+                          key: "modelHoleTilt",
+                          label: "Tilt",
+                          max: 180,
+                          describe: (value: number) =>
+                            value === 0 ? "upright" : value === 90 ? "flat" : value === 180 ? "upside down" : `${value}°`,
+                        },
+                        { key: "modelHoleTurn", label: "Turn", max: 345, describe: (value: number) => `${value}°` },
+                      ] as const
+                    ).map(({ key, label, max, describe }) => (
+                      <label key={key} className="flex items-center gap-3 text-xs text-zinc-500">
+                        <span className="w-8 shrink-0">{label}</span>
+                        <input
+                          type="range"
+                          min={0}
+                          max={max}
+                          step={15}
+                          value={settings[key]}
+                          aria-label={`Curved hole ${label.toLowerCase()}`}
+                          onChange={(event) => {
+                            const value = Number(event.target.value);
+                            patch(key === "modelHoleTilt" ? { modelHoleTilt: value } : { modelHoleTurn: value });
+                          }}
+                          className="min-w-0 flex-1 accent-blue-600"
+                        />
+                        <span className="w-20 shrink-0 text-right tabular-nums">{describe(settings[key])}</span>
+                      </label>
+                    ))}
+                    {(settings.modelHoleTilt !== 0 || settings.modelHoleTurn !== 0) && (
+                      <button
+                        type="button"
+                        onClick={() => patch({ modelHoleTilt: 0, modelHoleTurn: 0 })}
+                        className="justify-self-start text-xs text-blue-600 hover:underline"
+                      >
+                        Back to upright
+                      </button>
+                    )}
+                  </div>
+                )}
+                {settings.loopStyle === "object" && (
+                  <span className="mt-1 block text-xs text-zinc-400">
+                    {settings.modelHoleShape === "straight"
+                      ? "Bored straight through the object."
+                      : "A curved tunnel that dips under the surface and comes back out, so the ring hangs from a bridge. Tilt lays it over (flat at 90°, so it opens on a side) and Turn spins it around."}{" "}
+                    Drag the hole in the preview to move it. If it&apos;s in the cap, glue the cap onto the stem so the keyring can&apos;t pull it off.
+                  </span>
+                )}
               </div>
             );
           }

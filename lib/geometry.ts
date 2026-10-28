@@ -42,7 +42,47 @@ export type KeychainModel = {
   depth: number;
   warnings: string[];
   charmBounds: CharmBox[];
-  hole: { x: number; y: number; radius: number } | null;
+  hole: ModelHole | null;
+  cut?: ModelCut;
+  assembly?: ModelAssembly;
+};
+
+// Where a model splits into cap and housing, for dragging the cut up and down: `z` is
+// the housing's top between `minX` and `maxX`, and `mm` the cut over the model's
+// `height` in mm.
+export type ModelCut = { z: number; minX: number; maxX: number; mm: number; height: number };
+
+// The parts apart, for animating the fit: the cap moves by `offset` from where it lies
+// to where it sits on the housing, and clicks `press` mm down.
+export type ModelAssembly = {
+  housing: { text: THREE.BufferGeometry; base: THREE.BufferGeometry };
+  cap: { text: THREE.BufferGeometry; base: THREE.BufferGeometry };
+  offset: { x: number; y: number; z: number };
+  press: number;
+};
+
+export function disposeModel(model: KeychainModel) {
+  model.text.dispose();
+  model.base.dispose();
+  if (!model.assembly) return;
+  for (const part of [model.assembly.housing, model.assembly.cap]) {
+    part.text.dispose();
+    part.base.dispose();
+  }
+}
+
+// A draggable hole. Flat ones run up through the part at (x, y). Ones with an `axis` run
+// sideways through (x, y, z), and drag across the plane facing that axis; `unit` is mm per
+// setting unit and (u, v) the setting's current value, across and up.
+export type ModelHole = {
+  x: number;
+  y: number;
+  radius: number;
+  z?: number;
+  axis?: "x" | "y";
+  unit?: number;
+  u?: number;
+  v?: number;
 };
 
 type Point = { x: number; y: number };

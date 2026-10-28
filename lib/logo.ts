@@ -471,6 +471,14 @@ function colorParts(image: HTMLImageElement, raster: number): ImagePart[] {
   return parts;
 }
 
+// Outer and hole rings of a pixel mask (row 0 at the top), in pixel units with y up.
+export function maskRings(width: number, height: number, filled: (x: number, y: number) => boolean) {
+  const cell = GRID / Math.max(width, height);
+  return smoothRings(width, height, (x, y) => (filled(x, y) ? 1 : 0), 0.7, cell).map((path) =>
+    simplify(path, cell * 0.4).map((point) => ({ x: point.X / cell, y: point.Y / cell })),
+  );
+}
+
 export async function emojiLineArt(emoji: string, edges: LogoEdges = "smooth") {
   const response = await fetch(`/emoji/${emoji}.svg`);
   if (!response.ok) throw new Error("Could not load that emoji.");

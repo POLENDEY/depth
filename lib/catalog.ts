@@ -6,8 +6,9 @@ export type Pattern = "vertical" | "square" | "smooth";
 export type Relief = "embossed" | "debossed";
 export type TextFlow = "vertical" | "horizontal";
 export type LinkStyle = "tile" | "block";
-export type LoopStyle = "tab" | "ring" | "heart" | "star" | "corner" | "none";
+export type LoopStyle = "tab" | "ring" | "heart" | "star" | "corner" | "object" | "none";
 export type LoopSide = "left" | "right";
+export type ModelHoleShape = "straight" | "torus";
 
 export type SurfacePattern = "plain" | "ribs" | "stripes" | "waves" | "diamond" | "dots";
 export type SurfaceOn = "both" | "housing" | "caps";
@@ -29,6 +30,7 @@ export const LOOP_STYLES: { value: LoopStyle; label: string }[] = [
   { value: "heart", label: "Heart" },
   { value: "star", label: "Star" },
   { value: "corner", label: "Corner loop" },
+  { value: "object", label: "Through the object" },
   { value: "none", label: "No hole" },
 ];
 
@@ -118,6 +120,20 @@ export type ProductSettings = {
   housingParts: number[][];
   // "whole": a cap is its part with everything drawn inside it; "parts": just the part.
   partCaps: PartCaps;
+  // An uploaded 3D model (empty for the sample) and its keyring hole, in model units
+  // across and up; null places the hole automatically.
+  modelId: string;
+  modelHole: Pt | null;
+  // A straight bore through the object, or a curved tunnel that dips under its surface.
+  modelHoleShape: ModelHoleShape;
+  // The curved tunnel's direction in degrees: tipped from upright (0) to flat (90) and
+  // beyond, and turned around the vertical.
+  modelHoleTilt: number;
+  modelHoleTurn: number;
+  // Where the model splits into cap and housing, as a share of its height (0 = auto),
+  // and the switch's spot in model units (null = auto).
+  modelCut: number;
+  modelSwitch: Pt | null;
   charms: CharmPlacement[];
   charmBase: number;
   tagSize: number;
@@ -143,6 +159,7 @@ export type Field =
   | { type: "loop-style"; label: string }
   | { type: "surface"; label: string }
   | { type: "housing"; label: string }
+  | { type: "model"; label: string }
   | { type: "charm" }
   | { type: "colors"; text: string; base: string };
 
@@ -186,6 +203,13 @@ const shared = {
   keyLayout: [] as Pt[],
   housingParts: [] as number[][],
   partCaps: "whole" as PartCaps,
+  modelId: "",
+  modelHole: null as Pt | null,
+  modelHoleShape: "torus" as ModelHoleShape,
+  modelHoleTilt: 0,
+  modelHoleTurn: 0,
+  modelCut: 0,
+  modelSwitch: null as Pt | null,
   charms: [] as CharmPlacement[],
   charmBase: 1.2,
   tagSize: 48,
@@ -390,6 +414,29 @@ export const PRODUCTS: Product[] = [
       { type: "loop-style", label: "Keyring hole" },
       { type: "number", key: "holeDiameter", label: "Ring hole", min: 3, max: 6, step: 0.5 },
       { type: "colors", text: "Letters", base: "Housing & caps" },
+    ],
+  },
+  {
+    slug: "model-clicker",
+    title: "3D Clicker",
+    summary: "Upload a 3D model and it's cut into a clicker: the top clicks down on a mechanical switch hidden in the bottom, with a keyring hole.",
+    button: "#ff8f7d",
+    settings: {
+      ...shared,
+      text: "",
+      textColor: "#facc15",
+      baseColor: "#f05a28",
+      letterHeight: 10,
+      textThickness: 1,
+      baseThickness: 19.1,
+      housingSize: 55,
+      holeDiameter: 5,
+    },
+    fields: [
+      { type: "model", label: "3D model" },
+      { type: "loop-style", label: "Keyring hole" },
+      { type: "number", key: "holeDiameter", label: "Ring hole", min: 3, max: 6, step: 0.5 },
+      { type: "colors", text: "Object", base: "Borders" },
     ],
   },
   {
