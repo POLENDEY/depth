@@ -1,6 +1,7 @@
 ﻿import * as THREE from "three";
 import type { Pt } from "./clicker-layout";
 import { maskRings } from "./logo";
+import { repairMesh, type MeshRepair } from "./mesh-repair";
 
 // Imported models are scaled so their footprint's longer side is this many units; the
 // clicker then sizes them in millimeters.
@@ -32,6 +33,13 @@ export type ImportedModel = {
   positions: Float32Array;
   height: number;
   side: SideView;
+  // How the upload was fixed when it wasn't a closed solid, with a rebuild's grid step in
+  // model units.
+  repair: MeshRepair | null;
+  // Turned so a tilted cut lies flat: `frame` takes the upload's model units to these, which
+  // are `factor` times as big. Uploads themselves have no frame and a factor of 1.
+  frame: THREE.Matrix4 | null;
+  factor: number;
 };
 
 const models = new Map<string, ImportedModel>();
@@ -88,10 +96,11 @@ export async function importModel(file: File) {
     positions.set(chunk, at);
     at += chunk.length;
   }
-  return registerModel(file.name.replace(/\.[^.]+$/, ""), positions);
+  const repaired = await repairMesh(positions);
+  return registerModel(file.name.replace(/\.[^.]+$/, ""), repaired.positions, repaired.repair);
 }
 
-export function registerModel(name: string, raw: Float32Array) {
+export function registerModel(name: string, raw: Float32Array, repair: MeshRepair | null = null) {
   const box = new THREE.Box3().setFromArray(raw);
   const span = Math.max(box.max.x - box.min.x, box.max.y - box.min.y);
   if (!(span > 0) || !(box.max.z > box.min.z)) throw new Error("That model is flat or empty. Upload a solid 3D object.");
@@ -109,10 +118,58 @@ export function registerModel(name: string, raw: Float32Array) {
     positions,
     height: (box.max.z - box.min.z) * scale,
     side: sideView(positions),
+    repair: repair?.kind === "rebuilt" ? { kind: "rebuilt", detail: repair.detail * scale } : repair,
+    frame: null,
+    factor: 1,
   };
   const id = `model-${++counter}`;
   models.set(id, model);
   return id;
+}
+
+// The cut's normal (pointing into the cap) for a tilt from flat and a turn around the
+// vertical, in degrees.
+export function cutNormal(tilt: number, turn: number) {
+  const t = (tilt * Math.PI) / 180;
+  const p = (turn * Math.PI) / 180;
+  return new THREE.Vector3(Math.sin(t) * Math.cos(p), Math.sin(t) * Math.sin(p), Math.cos(t));
+}
+
+export function isTiltedCut(tilt: number) {
+  return Math.abs(tilt) % 360 > 1e-6;
+}
+
+// The model turned so a cut at this tilt and turn is flat, as its own model: centered from
+// above, resting on z = 0, and scaled so its footprint fits the grid. A flat cut is the model.
+export function cutFrameModel(id: string, tilt: number, turn: number) {
+  if (!isTiltedCut(tilt)) return id;
+  const key = `${id}@${tilt.toFixed(2)}:${turn.toFixed(2)}`;
+  if (models.has(key)) return key;
+  const source = models.get(id);
+  if (!source) throw new Error("That 3D model is no longer loaded. Upload it again.");
+  const turnUp = new THREE.Matrix4().makeRotationFromQuaternion(
+    new THREE.Quaternion().setFromUnitVectors(cutNormal(tilt, turn), new THREE.Vector3(0, 0, 1)),
+  );
+  const turned = Float32Array.from(source.positions);
+  new THREE.BufferAttribute(turned, 3).applyMatrix4(turnUp);
+  const box = new THREE.Box3().setFromArray(turned);
+  const factor = EXTENT / Math.max(box.max.x - box.min.x, box.max.y - box.min.y);
+  const frame = new THREE.Matrix4()
+    .makeTranslation(-(box.min.x + box.max.x) / 2, -(box.min.y + box.max.y) / 2, -box.min.z)
+    .premultiply(new THREE.Matrix4().makeScale(factor, factor, factor))
+    .multiply(turnUp);
+  const positions = Float32Array.from(source.positions);
+  new THREE.BufferAttribute(positions, 3).applyMatrix4(frame);
+  models.set(key, {
+    name: source.name,
+    positions,
+    height: (box.max.z - box.min.z) * factor,
+    side: sideView(positions),
+    repair: source.repair,
+    frame,
+    factor,
+  });
+  return key;
 }
 
 // Fills every triangle's projection into a `width` x `height` mask; (u, v) picks the axes.
@@ -448,9 +505,12 @@ function narrow(volume: Volume, z0: number, z1: number, need: number, slack: Flo
 function switchSlack(volume: Volume, scale: number, cut: number) {
   const unit = (mm: number) => mm / scale;
   const plate = plateHeight(cut);
+  // The switch's floor sits under its pins, not at the bottom, so a pointed or tilted
+  // bottom only needs material there.
+  const floor = plate - CUT.base;
   const slack = new Float32Array(GRID * GRID).fill(Infinity);
-  narrow(volume, unit(0.4), unit(CUT.floor), unit(CUT.baseHalf - 1.6), slack);
-  narrow(volume, unit(CUT.floor), unit(plate), unit(CUT.baseHalf), slack);
+  narrow(volume, unit(floor + 0.4), unit(floor + CUT.floor), unit(CUT.baseHalf - 1.6), slack);
+  narrow(volume, unit(floor + CUT.floor), unit(plate), unit(CUT.baseHalf), slack);
   narrow(volume, unit(plate), unit(cut), unit(CUT.hollow / 2 + CUT.capWall + CUT.gap + CUT.wall), slack);
   narrow(volume, unit(cut), unit(cut + CUT.ceiling), unit(CUT.hollow / 2 + CUT.capWall), slack);
   narrow(volume, unit(cut + CUT.ceiling), unit(cut + CUT.ceiling + CUT.capWall), unit(CUT.hollow / 2), slack);
@@ -486,7 +546,7 @@ export function smallestSize(id: string) {
   if (smallest.has(id)) return smallest.get(id)!;
   const model = models.get(id);
   if (!model) throw new Error("That 3D model is no longer loaded. Upload it again.");
-  const fits = (size: number) => workableCuts(id, model, size / EXTENT).length > 0;
+  const fits = (size: number) => workableCuts(id, model, size / EXTENT / model.factor).length > 0;
   let result: number | null = null;
   if (fits(MAX_SIZE)) {
     let low = 10;
@@ -528,7 +588,14 @@ function cellCenter(index: number): Pt {
 
 // Where the switch goes in a model cut at `share` of its height (0 picks a height), at
 // `size` mm (clamped to what fits), centered at `switchAt` model units (null: the roomiest spot).
-export function clickerPlan(id: string, size: number, share: number, switchAt: Pt | null): ClickerPlan {
+// `allowed` (mm) keeps the switch under the part of the cut that clicks.
+export function clickerPlan(
+  id: string,
+  size: number,
+  share: number,
+  switchAt: Pt | null,
+  allowed?: (x: number, y: number) => boolean,
+): ClickerPlan {
   const model = models.get(id);
   if (!model) throw new Error("That 3D model is no longer loaded. Upload it again.");
   const least = smallestSize(id);
@@ -538,12 +605,24 @@ export function clickerPlan(id: string, size: number, share: number, switchAt: P
     );
   }
   const fitted = Math.min(MAX_SIZE, Math.max(least, size));
-  const scale = fitted / EXTENT;
+  const scale = fitted / EXTENT / model.factor;
   const height = model.height * scale;
   const cuts = workableCuts(id, model, scale);
   const target = (share > 0 ? share : 0.4) * height;
   const cut = cuts.reduce((best, value) => (Math.abs(value - target) < Math.abs(best - target) ? value : best), cuts[0]);
   const slack = switchSlack(volumeOf(model), scale, cut);
+  if (allowed) {
+    let left = 0;
+    for (let index = 0; index < slack.length; index += 1) {
+      if (slack[index] < 0) continue;
+      const center = cellCenter(index);
+      if (allowed(center.x * scale, center.y * scale)) left += 1;
+      else slack[index] = -1;
+    }
+    if (!left) {
+      throw new Error("The piece you picked for the cap has no room for the switch at this cut. Pick a bigger piece or move the cut.");
+    }
+  }
   let best = 0;
   for (let index = 1; index < slack.length; index += 1) if (slack[index] > slack[best]) best = index;
   const auto = cellCenter(best);

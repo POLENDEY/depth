@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import {
@@ -12,6 +12,9 @@ import {
   type KeychainModel,
   type ModelAssembly,
 } from "@/lib/geometry";
+import type { Pt3 } from "@/lib/catalog";
+import { cutNormal } from "@/lib/model-import";
+import { CUT_AXES, CutEditor, normalAngles, type CutHandle } from "./cut-editor";
 
 type ViewerApi = {
   textMesh: THREE.Mesh;
@@ -29,6 +32,8 @@ type ViewerApi = {
   capGroup: THREE.Group;
   fitGroup: THREE.Group;
   fit: { assembly: ModelAssembly | null; start: number };
+  cutEditor: CutEditor;
+  editing: { on: boolean; dragging: boolean };
 };
 
 // The cap's path in the fit animation (seconds in): up off the bed, over the housing, down
@@ -51,6 +56,9 @@ function capPose(time: number, assembly: ModelAssembly, out: THREE.Vector3) {
   return out.set(offset.x, offset.y, offset.z - press * down);
 }
 
+const TOOL =
+  "inline-flex items-center gap-1.5 rounded-full border border-[#e6e7ec] px-3 py-1.5 text-xs font-medium shadow-sm backdrop-blur";
+
 type ViewerProps = {
   model: KeychainModel | null;
   textColor: string;
@@ -62,6 +70,16 @@ type ViewerProps = {
   holeY?: number;
   onHoleMove?: (x: number, y: number) => void;
   onCutMove?: (mm: number) => void;
+  // The cut's direction (degrees) and spot (share of the height along it), to tilt in place.
+  cutTilt?: number;
+  cutTurn?: number;
+  cutShare?: number;
+  onCutTransform?: (tilt: number, turn: number, share: number) => void;
+  // Index into the model's cut editor pieces: clicked to go with the cap or not.
+  onCutPiece?: (index: number) => void;
+  // A clicked smart-fill region: the cut that takes it off, and a point on it (upload units)
+  // that picks its piece for the cap.
+  onCutPick?: (tilt: number, turn: number, share: number, at: Pt3) => void;
   showDimensions?: boolean;
   onToggleDimensions?: () => void;
 };
@@ -76,7 +94,38 @@ type DragInfo = {
   onHoleMove?: (x: number, y: number) => void;
   cut: KeychainModel["cut"];
   onCutMove?: (mm: number) => void;
+  onCutTransform?: (tilt: number, turn: number, share: number) => void;
+  onCutPiece?: (index: number) => void;
+  onCutPick?: (tilt: number, turn: number, share: number, at: Pt3) => void;
+  onCutReadout?: (text: string | null) => void;
+  cutTilt?: number;
+  cutTurn?: number;
+  cutShare?: number;
+  // Puts the shown cut back where the settings say.
+  syncCut?: () => void;
 };
+
+// Shown directions into the upload's, when the part is shown turned.
+function unturn(basis: number[] | undefined, vector: THREE.Vector3) {
+  if (!basis) return vector;
+  const { x, y, z } = vector;
+  return vector.set(
+    basis[0] * x + basis[1] * y + basis[2] * z,
+    basis[3] * x + basis[4] * y + basis[5] * z,
+    basis[6] * x + basis[7] * y + basis[8] * z,
+  );
+}
+
+// The upload's directions into shown ones (the basis transposed).
+function returnTurn(basis: number[] | undefined, vector: THREE.Vector3) {
+  if (!basis) return vector;
+  const { x, y, z } = vector;
+  return vector.set(
+    basis[0] * x + basis[3] * y + basis[6] * z,
+    basis[1] * x + basis[4] * y + basis[7] * z,
+    basis[2] * x + basis[5] * y + basis[8] * z,
+  );
+}
 
 export function Viewer({
   model,
@@ -89,6 +138,12 @@ export function Viewer({
   holeY = 0,
   onHoleMove,
   onCutMove,
+  cutTilt = 0,
+  cutTurn = 0,
+  cutShare = 0.4,
+  onCutTransform,
+  onCutPiece,
+  onCutPick,
   showDimensions = false,
   onToggleDimensions,
 }: ViewerProps) {
@@ -96,6 +151,32 @@ export function Viewer({
   const apiRef = useRef<ViewerApi | null>(null);
   const lineMatsRef = useRef<THREE.MeshStandardMaterial[]>([]);
   const [playing, setPlaying] = useState(false);
+  const [editingCut, setEditingCut] = useState(false);
+  const [cutReadout, setCutReadout] = useState<string | null>(null);
+  const [fillAngle, setFillAngle] = useState(30);
+  const fillAngleRef = useRef(fillAngle);
+  const fillNoteRef = useRef<HTMLSpanElement>(null);
+  const canEditCut = Boolean(model?.cutEditor && onCutTransform);
+  const editing = editingCut && canEditCut;
+  // The shown cut follows the settings, using the built plane once the build matches.
+  const syncCut = useCallback(() => {
+    const api = apiRef.current;
+    if (!api || api.editing.dragging) return;
+    const data = model?.cutEditor ?? null;
+    api.cutEditor.setData(data);
+    if (!data) return;
+    const normal = cutNormal(cutTilt, cutTurn);
+    const built = api.cutEditor.fresh && data.tilt === cutTilt && data.turn === cutTurn;
+    if (!built && api.cutEditor.fresh) api.cutEditor.markStale();
+    let point: THREE.Vector3;
+    if (built) point = new THREE.Vector3(...data.point);
+    else {
+      const [low, high] = api.cutEditor.extent(normal);
+      point = normal.clone().multiplyScalar(low + cutShare * (high - low));
+    }
+    api.cutEditor.setPlane(normal, point);
+  }, [model, cutTilt, cutTurn, cutShare]);
+  useEffect(() => syncCut(), [syncCut]);
   const dragRef = useRef<DragInfo>({
     charmBounds: [],
     charms: [],
@@ -115,8 +196,20 @@ export function Viewer({
       onHoleMove,
       cut: model?.cut,
       onCutMove,
+      onCutTransform,
+      onCutPiece,
+      onCutPick,
+      onCutReadout: setCutReadout,
+      cutTilt,
+      cutTurn,
+      cutShare,
+      syncCut,
     };
-  }, [model, charms, onCharmMove, holeX, holeY, onHoleMove, onCutMove]);
+  }, [model, charms, onCharmMove, holeX, holeY, onHoleMove, onCutMove, onCutTransform, onCutPiece, onCutPick, cutTilt, cutTurn, cutShare, syncCut]);
+  useEffect(() => {
+    fillAngleRef.current = fillAngle;
+    apiRef.current?.cutEditor.setFillAngle(fillAngle);
+  }, [fillAngle]);
   useEffect(() => {
     const host = hostRef.current;
     if (!host) return;
@@ -133,6 +226,7 @@ export function Viewer({
     renderer.toneMappingExposure = 1.05;
     renderer.shadowMap.enabled = true;
     renderer.shadowMap.type = THREE.PCFShadowMap;
+    renderer.localClippingEnabled = true;
     host.appendChild(renderer.domElement);
     renderer.domElement.className = "h-full w-full touch-none";
 
@@ -220,6 +314,11 @@ export function Viewer({
     fitGroup.visible = false;
     modelRoot.add(fitGroup);
     const fit = { assembly: null as ModelAssembly | null, start: 0 };
+    const cutEditor = new CutEditor();
+    cutEditor.group.visible = false;
+    modelRoot.add(cutEditor.group);
+    const editing = { on: false, dragging: false };
+    const viewport = { width: 1, height: 1 };
 
     let userMoved = false;
     const framedCenter = new THREE.Vector3();
@@ -234,13 +333,19 @@ export function Viewer({
       modelRoot.rotation.set(-Math.PI / 2, 0, 0);
       modelRoot.position.set(0, 0, 0);
       modelRoot.updateWorldMatrix(true, true);
-      const raw = new THREE.Box3().setFromObject(baseMesh).union(new THREE.Box3().setFromObject(textMesh));
+      const shown = () =>
+        editing.on && cutEditor.hasSource
+          ? new THREE.Box3().setFromObject(cutEditor.sourceMesh)
+          : new THREE.Box3().setFromObject(baseMesh).union(new THREE.Box3().setFromObject(textMesh));
+      const raw = shown();
       if (raw.isEmpty()) return;
       modelRoot.position.y -= raw.min.y;
       modelRoot.updateWorldMatrix(true, true);
-      const placed = new THREE.Box3().setFromObject(baseMesh).union(new THREE.Box3().setFromObject(textMesh));
+      const placed = shown();
       const center = placed.getCenter(new THREE.Vector3());
       const size = placed.getSize(new THREE.Vector3());
+      // The cut's disc reaches past the model's corners, so the editor frames all of it.
+      if (editing.on && cutEditor.hasSource) size.setScalar(size.length() * 0.95);
       const radius = Math.max(size.x, size.y, size.z) * 0.62 || 20;
       if (!userMoved) {
         const verticalFov = (camera.fov * Math.PI) / 180;
@@ -273,6 +378,8 @@ export function Viewer({
       camera.aspect = width / height;
       camera.updateProjectionMatrix();
       renderer.setSize(width, height, false);
+      viewport.width = width;
+      viewport.height = height;
       frame(false);
     };
     const observer = new ResizeObserver(resize);
@@ -282,6 +389,11 @@ export function Viewer({
     const loop = () => {
       if (fit.assembly) capPose(performance.now() / 1000 - fit.start, fit.assembly, capGroup.position);
       controls.update();
+      if (editing.on) {
+        if (hoverEvent && !gizmoDrag.active) hover(hoverEvent);
+        hoverEvent = null;
+        cutEditor.update(camera, viewport);
+      }
       renderer.render(scene, camera);
     };
     const onVisibility = () => {
@@ -305,6 +417,8 @@ export function Viewer({
       capGroup,
       fitGroup,
       fit,
+      cutEditor,
+      editing,
     };
 
     const raycaster = new THREE.Raycaster();
@@ -327,7 +441,178 @@ export function Viewer({
       pointer.y = -((event.clientY - rect.top) / Math.max(rect.height, 1)) * 2 + 1;
     };
 
+    // The cut editor: a ring turns the cut about its axis, the arrow slides it, and a click
+    // on a piece over the cut picks it for the cap (or puts it back on the housing).
+    const gizmoDrag = {
+      active: false,
+      handle: "move" as CutHandle,
+      pointerId: -1,
+      startNormal: new THREE.Vector3(),
+      center: new THREE.Vector3(),
+      lastAngle: 0,
+      turned: 0,
+      startAlong: 0,
+      range: [0, 1] as readonly [number, number],
+    };
+    const click = { pointerId: -1, x: 0, y: 0 };
+    let hoverEvent: PointerEvent | null = null;
+    // The pointer's angle around a point's spot on screen, counterclockwise.
+    const screenAngle = (event: PointerEvent, center: THREE.Vector3) => {
+      const rect = renderer.domElement.getBoundingClientRect();
+      const shown = modelRoot.localToWorld(center.clone()).project(camera);
+      const x = rect.left + ((shown.x + 1) / 2) * rect.width;
+      const y = rect.top + ((1 - shown.y) / 2) * rect.height;
+      return Math.atan2(y - event.clientY, event.clientX - x);
+    };
+    // How far along the line through `center` facing `normal` the pointer's ray passes closest.
+    const alongLine = (center: THREE.Vector3, normal: THREE.Vector3) => {
+      const ray = raycaster.ray.clone().applyMatrix4(modelRoot.matrixWorld.clone().invert());
+      const lean = normal.dot(ray.direction);
+      const square = 1 - lean * lean;
+      if (square < 1e-4) return null;
+      const toCenter = center.clone().sub(ray.origin);
+      return (lean * ray.direction.dot(toCenter) - normal.dot(toCenter)) / square;
+    };
+    const onEditorDown = (event: PointerEvent) => {
+      if (event.button !== 0 || event.shiftKey || event.altKey || event.metaKey) return;
+      setPointer(event);
+      raycaster.setFromCamera(pointer, camera);
+      const handle = cutEditor.pickHandle(raycaster);
+      if (!handle) {
+        click.pointerId = event.pointerId;
+        click.x = event.clientX;
+        click.y = event.clientY;
+        return;
+      }
+      gizmoDrag.active = true;
+      gizmoDrag.handle = handle;
+      gizmoDrag.pointerId = event.pointerId;
+      gizmoDrag.startNormal.copy(cutEditor.normal);
+      gizmoDrag.center.copy(cutEditor.planeCenter());
+      if (handle === "move") {
+        gizmoDrag.startAlong = alongLine(gizmoDrag.center, gizmoDrag.startNormal) ?? 0;
+        gizmoDrag.range = cutEditor.extent(gizmoDrag.startNormal);
+      } else {
+        gizmoDrag.lastAngle = screenAngle(event, gizmoDrag.center);
+        gizmoDrag.turned = 0;
+      }
+      editing.dragging = true;
+      cutEditor.setActive(handle);
+      userMoved = true;
+      controls.enabled = false;
+      renderer.domElement.style.cursor = "grabbing";
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    };
+    const onGizmoMove = (event: PointerEvent) => {
+      setPointer(event);
+      raycaster.setFromCamera(pointer, camera);
+      const info = dragRef.current;
+      const { center, startNormal, handle } = gizmoDrag;
+      if (handle === "move") {
+        const along = alongLine(center, startNormal);
+        if (along === null) return;
+        const [low, high] = gizmoDrag.range;
+        const span = Math.max(high - low, 1e-6);
+        const start = center.dot(startNormal);
+        const at = Math.min(high - span * 0.01, Math.max(low + span * 0.01, start + along - gizmoDrag.startAlong));
+        cutEditor.setPlane(startNormal, center.clone().addScaledVector(startNormal, at - start));
+        info.onCutReadout?.(`Cut ${Math.round(((at - low) / span) * 100)}% of the way up`);
+        return;
+      }
+      const angle = screenAngle(event, center);
+      let step = angle - gizmoDrag.lastAngle;
+      if (step > Math.PI) step -= Math.PI * 2;
+      if (step < -Math.PI) step += Math.PI * 2;
+      gizmoDrag.turned += step;
+      gizmoDrag.lastAngle = angle;
+      const axis = CUT_AXES[handle];
+      // Counterclockwise on screen turns the right-hand way about an axis facing the camera.
+      const toCamera = camera.position.clone().sub(modelRoot.localToWorld(center.clone()));
+      const sign = axis.clone().transformDirection(modelRoot.matrixWorld).dot(toCamera) >= 0 ? 1 : -1;
+      const snap = event.ctrlKey ? 15 : 1;
+      const degrees = Math.round((sign * gizmoDrag.turned * 180) / Math.PI / snap) * snap;
+      const normal = startNormal.clone().applyAxisAngle(axis, (degrees * Math.PI) / 180);
+      cutEditor.setPlane(normal, center);
+      const { tilt, turn } = normalAngles(normal);
+      info.onCutReadout?.(`${handle.toUpperCase()} ${degrees > 0 ? "+" : ""}${degrees}° · Tilt ${tilt}° · Turn ${turn}°`);
+    };
+    const finishGizmo = () => {
+      gizmoDrag.active = false;
+      editing.dragging = false;
+      cutEditor.setActive(null);
+      controls.enabled = true;
+      renderer.domElement.style.cursor = "";
+      const info = dragRef.current;
+      info.onCutReadout?.(null);
+      const { tilt, turn } = normalAngles(cutEditor.normal);
+      const normal = cutNormal(tilt, turn);
+      const [low, high] = cutEditor.extent(normal);
+      const share = Math.min(0.99, Math.max(0.01, (cutEditor.point.dot(normal) - low) / Math.max(high - low, 1e-6)));
+      cutEditor.setPlane(normal, cutEditor.point);
+      if (tilt === info.cutTilt && turn === info.cutTurn && Math.abs(share - (info.cutShare ?? 0)) < 0.002) {
+        info.syncCut?.();
+        return;
+      }
+      cutEditor.markStale();
+      info.onCutTransform?.(tilt, turn, share);
+    };
+    // Hovering outlines the smart-fill region under the pointer; with Ctrl it lights the piece
+    // over the cut instead.
+    let notice = false;
+    const hover = (event: PointerEvent) => {
+      if (event.target !== renderer.domElement) {
+        cutEditor.setHover(null, -1);
+        cutEditor.setRegionHover(-1);
+        return;
+      }
+      setPointer(event);
+      raycaster.setFromCamera(pointer, camera);
+      const handle = cutEditor.pickHandle(raycaster);
+      const piece = !handle && event.ctrlKey ? cutEditor.pickPiece(raycaster) : -1;
+      const region = !handle && !event.ctrlKey ? cutEditor.pickRegion(raycaster) : -1;
+      cutEditor.setHover(handle, piece);
+      cutEditor.setRegionHover(region);
+      if (fillNoteRef.current && region >= 0) {
+        const used = cutEditor.usedFillAngle;
+        fillNoteRef.current.textContent = used < fillAngleRef.current ? `Smooth model: using ${used}°` : "";
+      }
+      if (notice && region < 0) {
+        notice = false;
+        dragRef.current.onCutReadout?.(null);
+      }
+      renderer.domElement.style.cursor = handle ? "grab" : piece >= 0 || region >= 0 ? "pointer" : "";
+    };
+    const pickRegion = (event: PointerEvent) => {
+      setPointer(event);
+      raycaster.setFromCamera(pointer, camera);
+      const info = dragRef.current;
+      const region = cutEditor.pickRegion(raycaster);
+      if (region < 0 || !info.onCutPick) return;
+      const suggestion = cutEditor.suggestCut(region);
+      if (!suggestion) {
+        notice = true;
+        info.onCutReadout?.("That part is most of the model. Lower the smart fill angle to split it at its edges.");
+        return;
+      }
+      const normal = new THREE.Vector3(...suggestion.normal);
+      const [low, high] = cutEditor.extent(normal);
+      const share = Math.min(0.99, Math.max(0.01, (suggestion.offset - low) / Math.max(high - low, 1e-6)));
+      const unit = cutEditor.unit;
+      cutEditor.setPlane(normal, normal.clone().multiplyScalar(suggestion.offset));
+      cutEditor.markStale();
+      info.onCutPick(suggestion.tilt, suggestion.turn, share, {
+        x: suggestion.at[0] / unit,
+        y: suggestion.at[1] / unit,
+        z: suggestion.at[2] / unit,
+      });
+    };
+
     const onPointerDown = (event: PointerEvent) => {
+      if (editing.on && !fit.assembly) {
+        onEditorDown(event);
+        return;
+      }
       if (event.button !== 0 || event.shiftKey || event.altKey || event.ctrlKey || event.metaKey) return;
       const info = dragRef.current;
       if (fit.assembly) return;
@@ -341,9 +626,8 @@ export function Viewer({
       const hole = info.hole;
       if (hole && info.onHoleMove) {
         const reach = hole.radius + 1.8;
-        const offset = !hole.axis
-          ? (local.x - hole.x) ** 2 + (local.y - hole.y) ** 2
-          : (hole.axis === "x" ? local.y - hole.y : local.x - hole.x) ** 2 + (local.z - (hole.z ?? 0)) ** 2;
+        const away = unturn(hole.basis, new THREE.Vector3(local.x - hole.x, local.y - hole.y, local.z - (hole.z ?? 0)));
+        const offset = !hole.axis ? away.x ** 2 + away.y ** 2 : (hole.axis === "x" ? away.y : away.x) ** 2 + away.z ** 2;
         if (offset <= reach ** 2) target = "hole";
       }
       const cut = info.cut;
@@ -385,9 +669,10 @@ export function Viewer({
       drag.startX = target === "hole" ? info.holeX : target === "cut" ? (cut?.mm ?? 0) : (charm?.x ?? 0);
       drag.startY = target === "hole" ? info.holeY : (charm?.y ?? 0);
       const axis = target === "hole" ? hole?.axis : undefined;
-      const normal = new THREE.Vector3(axis === "x" ? 1 : 0, axis === "y" ? 1 : 0, axis ? 0 : 1).transformDirection(
-        modelRoot.matrixWorld,
-      );
+      const normal = returnTurn(
+        axis ? hole?.basis : undefined,
+        new THREE.Vector3(axis === "x" ? 1 : 0, axis === "y" ? 1 : 0, axis ? 0 : 1),
+      ).transformDirection(modelRoot.matrixWorld);
       if (target === "cut") {
         // The cut moves up and down, on an upright plane facing the camera.
         const facing = camera
@@ -406,6 +691,15 @@ export function Viewer({
     };
 
     const onPointerMove = (event: PointerEvent) => {
+      if (gizmoDrag.active) {
+        if (event.pointerId === gizmoDrag.pointerId) onGizmoMove(event);
+        return;
+      }
+      if (editing.on && !drag.active) {
+        // Picked once a frame; orbiting with a button held doesn't hover.
+        hoverEvent = event.buttons === 0 ? event : null;
+        return;
+      }
       if (!drag.active || event.pointerId !== drag.pointerId) return;
       setPointer(event);
       raycaster.setFromCamera(pointer, camera);
@@ -420,8 +714,9 @@ export function Viewer({
       }
       const hole = info.hole;
       if (drag.target === "hole" && hole?.axis && hole.unit) {
-        const across = hole.axis === "x" ? dy : dx;
-        info.onHoleMove?.(drag.startX + across / hole.unit, drag.startY + (local.z - drag.startLocal.z) / hole.unit);
+        const moved = unturn(hole.basis, new THREE.Vector3(dx, dy, local.z - drag.startLocal.z));
+        const across = hole.axis === "x" ? moved.y : moved.x;
+        info.onHoleMove?.(drag.startX + across / hole.unit, drag.startY + moved.z / hole.unit);
         return;
       }
       if (drag.target === "hole") {
@@ -439,6 +734,21 @@ export function Viewer({
     };
 
     const endDrag = (event: PointerEvent) => {
+      if (gizmoDrag.active && event.pointerId === gizmoDrag.pointerId) {
+        finishGizmo();
+        return;
+      }
+      if (click.pointerId === event.pointerId) {
+        click.pointerId = -1;
+        if (event.type === "pointerup" && editing.on && Math.hypot(event.clientX - click.x, event.clientY - click.y) < 5) {
+          if (event.ctrlKey) {
+            setPointer(event);
+            raycaster.setFromCamera(pointer, camera);
+            const piece = cutEditor.pickPiece(raycaster);
+            if (piece >= 0) dragRef.current.onCutPiece?.(piece);
+          } else pickRegion(event);
+        }
+      }
       if (!drag.active || event.pointerId !== drag.pointerId) return;
       drag.active = false;
       controls.enabled = true;
@@ -464,6 +774,7 @@ export function Viewer({
       controls.dispose();
       textMat.dispose();
       baseMat.dispose();
+      cutEditor.dispose();
       clearDimensions(dimensionGroup);
       floor.geometry.dispose();
       (floor.material as THREE.Material).dispose();
@@ -499,7 +810,7 @@ export function Viewer({
   // Playing swaps in the parts apart and moves the cap onto the housing; pausing puts
   // both back on the bed.
   const assembly = model?.assembly ?? null;
-  const animating = playing && assembly !== null;
+  const animating = playing && assembly !== null && !editing;
   useEffect(() => {
     const api = apiRef.current;
     if (!api) return;
@@ -508,9 +819,19 @@ export function Viewer({
     if (animating && !wasAnimating) api.fit.start = performance.now() / 1000;
     if (!animating) api.capGroup.position.set(0, 0, 0);
     api.fitGroup.visible = animating;
-    api.textMesh.visible = !animating && model !== null;
-    api.baseMesh.visible = !animating && model !== null;
-  }, [animating, assembly, model]);
+    api.textMesh.visible = !animating && !editing && model !== null;
+    api.baseMesh.visible = !animating && !editing && model !== null;
+  }, [animating, assembly, model, editing]);
+
+  // The cut editor swaps the parts for the uncut model with the cut through it.
+  useEffect(() => {
+    const api = apiRef.current;
+    if (!api) return;
+    api.editing.on = editing;
+    api.cutEditor.group.visible = editing;
+    if (!editing) api.cutEditor.setHover(null, -1);
+    api.frame(true);
+  }, [editing]);
 
   const lineColorKey = (lineColors ?? []).join(",");
   useEffect(() => {
@@ -545,35 +866,83 @@ export function Viewer({
         role="img"
         aria-label="Interactive 3D preview. Drag to orbit, Shift and drag to pan, scroll to zoom. Drag an icon or the keyring hole to move that part on its own."
       />
-      <button
-        type="button"
-        onClick={() => apiRef.current?.frame(true)}
-        className="absolute top-3 right-3 z-10 rounded-full border border-[#e6e7ec] bg-white/90 px-3 py-1.5 text-xs font-medium text-zinc-600 shadow-sm backdrop-blur hover:bg-white"
-      >
-        Reset view
-      </button>
-      <button
-        type="button"
-        aria-pressed={showDimensions}
-        onClick={onToggleDimensions}
-        className="absolute top-3 right-28 z-10 rounded-full border border-[#e6e7ec] bg-white/90 px-3 py-1.5 text-xs font-medium text-zinc-600 shadow-sm backdrop-blur hover:bg-white"
-      >
-        Dimensions {showDimensions ? "On" : "Off"}
-      </button>
-      {assembly ? (
+      <div className="absolute top-3 right-3 z-10 flex flex-wrap items-center justify-end gap-2">
+        {canEditCut ? (
+          <button
+            type="button"
+            aria-pressed={editing}
+            title={editing ? "Done: back to the parts" : "Turn and move the cut on the whole model, and pick which pieces click"}
+            onClick={() => setEditingCut((current) => !current)}
+            className={`${TOOL} ${editing ? "border-blue-600 bg-blue-600 text-white hover:bg-blue-700" : "bg-white/90 text-zinc-600 hover:bg-white"}`}
+          >
+            <svg viewBox="0 0 16 16" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true">
+              <circle cx="8" cy="8" r="5.5" />
+              <path d="M1.5 9.5 14.5 6.5" strokeLinecap="round" />
+            </svg>
+            {editing ? "Done" : "Edit cut"}
+          </button>
+        ) : null}
+        {assembly && !editing ? (
+          <button
+            type="button"
+            aria-pressed={animating}
+            aria-label={animating ? "Pause the fit animation" : "Play the fit animation"}
+            title={animating ? "Pause: back on the bed" : "Play: put the cap on the housing and click it"}
+            onClick={() => setPlaying((current) => !current)}
+            className={`${TOOL} bg-white/90 text-zinc-600 hover:bg-white`}
+          >
+            <svg viewBox="0 0 12 12" className="h-3 w-3" fill="currentColor" aria-hidden="true">
+              {animating ? <path d="M2 1.5h3v9H2zM7 1.5h3v9H7z" /> : <path d="M2.5 1.2v9.6L10.5 6z" />}
+            </svg>
+            {animating ? "Pause" : "Play"}
+          </button>
+        ) : null}
         <button
           type="button"
-          aria-pressed={animating}
-          aria-label={animating ? "Pause the fit animation" : "Play the fit animation"}
-          title={animating ? "Pause: back on the bed" : "Play: put the cap on the housing and click it"}
-          onClick={() => setPlaying((current) => !current)}
-          className="absolute top-3 right-[15.25rem] z-10 inline-flex items-center gap-1.5 rounded-full border border-[#e6e7ec] bg-white/90 px-3 py-1.5 text-xs font-medium text-zinc-600 shadow-sm backdrop-blur hover:bg-white"
+          aria-pressed={showDimensions}
+          onClick={onToggleDimensions}
+          className={`${TOOL} bg-white/90 text-zinc-600 hover:bg-white`}
         >
-          <svg viewBox="0 0 12 12" className="h-3 w-3" fill="currentColor" aria-hidden="true">
-            {animating ? <path d="M2 1.5h3v9H2zM7 1.5h3v9H7z" /> : <path d="M2.5 1.2v9.6L10.5 6z" />}
-          </svg>
-          {animating ? "Pause" : "Play"}
+          Dimensions {showDimensions ? "On" : "Off"}
         </button>
+        <button type="button" onClick={() => apiRef.current?.frame(true)} className={`${TOOL} bg-white/90 text-zinc-600 hover:bg-white`}>
+          Reset view
+        </button>
+      </div>
+      {editing ? (
+        <div className="absolute top-14 right-3 z-10 max-w-[17rem] rounded-xl bg-white/90 px-3 py-2 text-xs text-zinc-600 shadow-sm backdrop-blur">
+          {cutReadout ? (
+            <p className="font-medium tabular-nums text-zinc-800">{cutReadout}</p>
+          ) : (
+            <>
+              <p>
+                Hover the model: a <span className="font-medium text-zinc-900">white outline</span> shows a part found by its edges.
+                Click it to cut that part off as the <span className="font-medium text-blue-500">cap</span>.
+              </p>
+              <p className="mt-1">
+                Drag a <span className="font-medium text-red-500">red</span>, <span className="font-medium text-green-600">green</span>,
+                or <span className="font-medium text-blue-600">blue</span> ring to turn the cut, and the{" "}
+                <span className="font-medium text-amber-500">arrow</span> to slide it. Hold Ctrl to snap to 15°.
+              </p>
+              <p className="mt-1">Ctrl+click a piece over the cut to swap it between cap and housing.</p>
+            </>
+          )}
+          <label className="mt-2 flex items-center gap-2 border-t border-[#f0f1f4] pt-2">
+            <span className="shrink-0">Smart fill angle</span>
+            <input
+              aria-label="Smart fill angle"
+              type="range"
+              min={5}
+              max={90}
+              step={1}
+              value={fillAngle}
+              onChange={(event) => setFillAngle(Number(event.target.value))}
+              className="min-w-0 flex-1 accent-blue-600"
+            />
+            <span className="w-7 text-right tabular-nums">{fillAngle}°</span>
+          </label>
+          <span ref={fillNoteRef} className="block text-[11px] text-zinc-400 empty:hidden" />
+        </div>
       ) : null}
     </>
   );

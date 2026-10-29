@@ -255,6 +255,38 @@ export function MakerStudio({ slug }: { slug: string }) {
                   }
                 : undefined
             }
+            cutTilt={settings.modelCutTilt ?? 0}
+            cutTurn={settings.modelCutTurn ?? 0}
+            cutShare={settings.modelCut || 0.4}
+            onCutTransform={
+              isModel
+                ? (tilt, turn, share) =>
+                    patch({
+                      modelCutTilt: tilt,
+                      modelCutTurn: turn,
+                      modelCut: share,
+                      ...(tilt !== settings.modelCutTilt || turn !== settings.modelCutTurn
+                        ? { modelSwitch: null, modelCutParts: null }
+                        : {}),
+                    })
+                : undefined
+            }
+            onCutPiece={
+              isModel && visible?.cutEditor
+                ? (index) => {
+                    const pieces = visible.cutEditor!.pieces;
+                    const picked = pieces.map((piece, at) => (at === index ? !piece.cap : piece.cap));
+                    if (!picked.some(Boolean)) return;
+                    patch({ modelCutParts: pieces.filter((_, at) => picked[at]).map((piece) => piece.at) });
+                  }
+                : undefined
+            }
+            onCutPick={
+              isModel
+                ? (tilt, turn, share, at) =>
+                    patch({ modelCutTilt: tilt, modelCutTurn: turn, modelCut: share, modelSwitch: null, modelCutParts: [at] })
+                : undefined
+            }
           />
           <div className="pointer-events-none absolute inset-x-0 bottom-0 flex flex-col gap-2 p-3 sm:flex-row sm:items-end sm:justify-between">
             <div className="rounded-xl bg-white/85 px-3 py-2 text-sm text-zinc-600 shadow-sm backdrop-blur">
@@ -266,7 +298,7 @@ export function MakerStudio({ slug }: { slug: string }) {
                 {slug === "magnet" && settings.charms.length
                   ? "Drag an emoji to move it · Drag empty space to orbit"
                   : isModel
-                  ? `Drag the cut${visible?.hole?.axis ? " or the ring hole" : ""} to move it · Drag elsewhere to orbit`
+                  ? `Drag the cut${visible?.hole?.axis ? " or the ring hole" : ""} to move it · Edit cut to turn it or pick pieces`
                   : "Drag to orbit · Shift+drag to pan · Scroll to zoom"}
               </p>
             </div>

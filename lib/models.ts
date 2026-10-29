@@ -20,7 +20,11 @@ import {
   bottomOutline,
   clickerPlan,
   CUT,
+  cutFrameModel,
+  cutNormal,
   ensureSampleModel,
+  importedModel,
+  isTiltedCut,
   SAMPLE_MODEL,
   tunnelDepth,
   tunnelPoint,
@@ -38,6 +42,7 @@ import {
   type GlyphLayout,
   type KeychainModel,
   type MeshQuality,
+  type ModelCutEditor,
 } from "./geometry";
 
 const FUSE = 0.15;
@@ -1150,13 +1155,45 @@ function plainGeometry(positions: Float32Array) {
   return geometry;
 }
 
-// An uploaded model cut flat in two: the top is the cap and the bottom the housing, with a
-// switch hidden inside and housing-colored bands on both sides of the cut.
+// Inside any of these outlines (even-odd), in the same units.
+function insidePolygons(polygons: { x: number; y: number }[][] | [number, number][][], x: number, y: number) {
+  let inside = false;
+  for (const ring of polygons) {
+    for (let index = 0, previous = ring.length - 1; index < ring.length; previous = index++) {
+      const a = ring[index];
+      const b = ring[previous];
+      const [ax, ay] = Array.isArray(a) ? a : [a.x, a.y];
+      const [bx, by] = Array.isArray(b) ? b : [b.x, b.y];
+      if (ay > y !== by > y && x < ((bx - ax) * (y - ay)) / (by - ay) + ax) inside = !inside;
+    }
+  }
+  return inside;
+}
+
+// An uploaded model cut in two along a plane that can tilt any way: the top is the cap and
+// the bottom the housing, with a switch hidden inside and housing-colored bands on both
+// sides of the cut. The work happens turned so the cut is flat; pieces over the cut that
+// aren't picked for the cap stay on the housing.
 function modelClicker(settings: ProductSettings, quality: MeshQuality) {
   ensureSampleModel();
   const id = settings.modelId || SAMPLE_MODEL;
-  const plan = clickerPlan(id, settings.housingSize, settings.modelCut, settings.modelSwitch);
-  const { model, scale, cut, plate, at } = plan;
+  const model = importedModel(id);
+  if (!model) throw new Error("That 3D model is no longer loaded. Upload it again.");
+  const tilt = settings.modelCutTilt ?? 0;
+  const turn = settings.modelCutTurn ?? 0;
+  const tilted = isTiltedCut(tilt);
+  const cutId = cutFrameModel(id, tilt, turn);
+  let plan = clickerPlan(cutId, settings.housingSize, settings.modelCut, settings.modelSwitch);
+  const { scale, cut, plate } = plan;
+  // The turn from the upload's model units to the flat cut's, and mm per upload unit.
+  const frame = plan.model.frame;
+  const unit = scale * plan.model.factor;
+  const toCut = (x: number, y: number, z: number) => {
+    const point = new THREE.Vector3(x, y, z);
+    if (frame) point.applyMatrix4(frame);
+    return point.multiplyScalar(scale);
+  };
+  const fromCutUnits = frame ? frame.clone().invert() : new THREE.Matrix4();
   const { Manifold } = manifoldKernel();
   const k = CLICKER;
   const preview = quality === "preview";
@@ -1164,6 +1201,13 @@ function modelClicker(settings: ProductSettings, quality: MeshQuality) {
   const holeRadius = clamp(settings.holeDiameter, 3, 6) / 2;
   const throughObject = settings.loopStyle === "object";
   const warnings: string[] = [];
+  if (model.repair?.kind === "welded") {
+    warnings.push("Your model had small gaps, doubled walls, or loose bits, so it was repaired automatically.");
+  } else if (model.repair?.kind === "rebuilt") {
+    warnings.push(
+      `Your model had holes in its surface, so it was rebuilt as a solid with about ${(model.repair.detail * unit).toFixed(1)} mm detail. Very fine details may be softened.`,
+    );
+  }
   const temps: { delete(): void }[] = [];
   const keep = <T extends { delete(): void }>(item: T) => {
     temps.push(item);
@@ -1171,42 +1215,47 @@ function modelClicker(settings: ProductSettings, quality: MeshQuality) {
   };
   try {
     let solid = modelSolid(id, model.positions, preview);
-    // The switch and its hollows span these heights (model units); a ring hole there would
-    // break into them.
-    const busy: [number, number] = [(plate - k.plate - k.below - 1) / scale, (cut + CUT.ceiling + CUT.capWall + 1) / scale];
+    // The switch and its hollows span these heights (mm over the flat cut's bottom); a ring
+    // hole there would break into them.
+    const busy: [number, number] = [plate - k.plate - k.below - 1, cut + CUT.ceiling + CUT.capWall + 1];
     let spot: { u: number; v: number } | null = null;
     let tunnel: Tunnel | null = null;
     const curved = settings.modelHoleShape !== "straight";
     // The curved tunnel's radius: its tube plus a bridge of material over it.
     const ring = holeRadius + 4.4;
     if (throughObject) {
-      const radius = holeRadius / scale;
-      const auto = autoHole(model, (holeRadius + (curved ? 2.4 : 1.6)) / scale, busy);
+      const radius = holeRadius / unit;
+      // Upright, the switch's heights are the upload's; tilted, any spot may cross them.
+      const avoid: [number, number] = tilted ? [-Infinity, -Infinity] : [busy[0] / unit, busy[1] / unit];
+      const auto = autoHole(model, (holeRadius + (curved ? 2.4 : 1.6)) / unit, avoid);
       spot = settings.modelHole ? { u: settings.modelHole.x, v: settings.modelHole.y } : auto;
       if (!settings.modelHole && !auto.fits) {
         warnings.push("The object is thin everywhere, so the ring hole has little material around it. Make it bigger or use a loop on the housing.");
       }
-      let low = spot.v;
-      let high = spot.v;
+      const onSide = (u: number, v: number): [number, number, number] =>
+        model.side.axis === "x" ? [0, u, v] : [u, 0, v];
+      let samples: [number, number, number][] = [onSide(spot.u, spot.v)];
       if (curved) {
         tunnel = {
           axis: model.side.axis,
           u: spot.u,
           v: spot.v,
-          ring: ring / scale,
+          ring: ring / unit,
           tilt: settings.modelHoleTilt,
           turn: settings.modelHoleTurn,
         };
-        tunnel.depth = tunnelDepth(model, tunnel, (holeRadius + 2.4) / scale);
+        tunnel.depth = tunnelDepth(model, tunnel, (holeRadius + 2.4) / unit);
         const reach = tunnelReach(model, tunnel);
-        ({ low, high } = reach);
+        const path = tunnel;
+        samples = Array.from({ length: 24 }, (_, step) => tunnelPoint(path, (step / 24) * Math.PI * 2));
         if (reach.share > 0.97) {
           warnings.push("The curved hole is buried inside the object, so it never comes out. Drag it to an edge or change its direction.");
         } else if (reach.share < 0.15) {
           warnings.push("The curved hole is mostly outside the object, so there's little bridge to hang from. Drag it further in or change its direction.");
         }
       }
-      if (high + radius > busy[0] && low - radius < busy[1]) {
+      const heights = samples.map(([x, y, z]) => toCut(x, y, z).z);
+      if (Math.max(...heights) + holeRadius > busy[0] && Math.min(...heights) - holeRadius < busy[1]) {
         warnings.push("The ring hole runs into the switch inside. Drag it higher or lower.");
       }
       solid = drilled(
@@ -1216,7 +1265,55 @@ function modelClicker(settings: ProductSettings, quality: MeshQuality) {
         1000,
       );
     }
-    const body = keep(solid.scale(scale));
+    const drilledSolid = solid;
+    const turned = frame ? keep(solid.transform(frame.elements as Parameters<Solid["transform"]>[0])) : solid;
+    const body = keep(turned.scale(scale));
+
+    // Every piece over the cut; the cap takes the picked ones (or the biggest), and the
+    // rest stay on the housing.
+    const top = keep(body.trimByPlane([0, 0, 1], cut));
+    const pieces = top.decompose().map(keep);
+    // How much of a piece is within `reach` mm of a point.
+    const overlap = (part: Solid, point: THREE.Vector3, reach: number) => {
+      const probe = Manifold.cube([reach * 2, reach * 2, reach * 2], true).translate(point.x, point.y, point.z);
+      const common = part.intersect(probe);
+      const volume = common.volume();
+      common.delete();
+      probe.delete();
+      return volume;
+    };
+    let capPieces = pieces;
+    if (pieces.length > 1) {
+      const picked = new Set<Solid>();
+      for (const point of settings.modelCutParts ?? []) {
+        const near = toCut(point.x, point.y, point.z);
+        let best: Solid | null = null;
+        let most = 1e-6;
+        for (const piece of pieces) {
+          const volume = overlap(piece, near, 1);
+          if (volume > most) {
+            most = volume;
+            best = piece;
+          }
+        }
+        if (best) picked.add(best);
+      }
+      capPieces = picked.size
+        ? pieces.filter((piece) => picked.has(piece))
+        : [pieces.reduce((a, b) => (b.volume() > a.volume() ? b : a))];
+    }
+    const split = capPieces.length < pieces.length;
+    const capTop = split ? keep(Manifold.union(capPieces)) : top;
+    const kept = split ? keep(Manifold.union(pieces.filter((piece) => !capPieces.includes(piece)))) : null;
+    const face = split ? keep(capTop.slice(cut + 0.02)) : null;
+    if (face) {
+      const outline = face.toPolygons();
+      plan = clickerPlan(cutId, settings.housingSize, settings.modelCut, settings.modelSwitch, (x, y) => insidePolygons(outline, x, y));
+    }
+    if (capPieces.length > 1) {
+      warnings.push("Some of the cap's pieces aren't joined to the one over the switch, so they print loose. Glue them on, or pick just one piece.");
+    }
+    const { at } = plan;
     const box = (width: number, depth: number, height: number, z: number) =>
       keep(Manifold.cube([width, depth, height], true).translate(at.x, at.y, z + height / 2));
 
@@ -1225,12 +1322,15 @@ function modelClicker(settings: ProductSettings, quality: MeshQuality) {
     for (let step = 0; step < 5; step += 1) {
       region = keep(region.intersect(keep(body.slice(plate + 0.05 + ((cut - plate - 0.1) * step) / 5))));
     }
+    // Only under the cap's own pieces.
+    if (face) region = keep(region.intersect(face));
     const inner = keep(region.offset(-CUT.wall, "Round", 2, fine));
     const plug = keep(inner.offset(-CUT.gap, "Round", 2, fine));
 
+    const bottom = keep(body.trimByPlane([0, 0, -1], -cut));
     const housing = keep(
       Manifold.difference([
-        keep(body.trimByPlane([0, 0, -1], -cut)),
+        kept ? keep(Manifold.union([bottom, kept])) : bottom,
         keep(inner.extrude(cut - plate + 1).translate(0, 0, plate)),
         box(k.cutout, k.cutout, k.plate + 0.02, plate - k.plate - 0.01),
         box(k.cavity, k.cavity, k.below + 0.01, plate - k.plate - k.below),
@@ -1242,7 +1342,7 @@ function modelClicker(settings: ProductSettings, quality: MeshQuality) {
       keep(Manifold.cube([width, depth, k.socket + 0.01], true).translate(at.x, at.y, postBottom - 0.01 + (k.socket + 0.01) / 2));
     const shell = keep(
       Manifold.difference([
-        keep(Manifold.union([keep(body.trimByPlane([0, 0, 1], cut)), keep(plug.extrude(CUT.plug + 0.01).translate(0, 0, cut - CUT.plug))])),
+        keep(Manifold.union([capTop, keep(plug.extrude(CUT.plug + 0.01).translate(0, 0, cut - CUT.plug))])),
         box(CUT.hollow, CUT.hollow, CUT.ceiling + CUT.plug + 0.01, cut - CUT.plug - 0.01),
       ]),
     );
@@ -1265,7 +1365,10 @@ function modelClicker(settings: ProductSettings, quality: MeshQuality) {
       return geometry;
     };
     const housingBody = [place(below(housing, cut - CUT.rim), false)];
-    const housingRim = [place(above(housing, cut - CUT.rim), false)];
+    // Pieces left on the housing over the cut keep the object's color; only the band at the
+    // cut takes the border's.
+    const housingRim = [place(kept ? below(above(housing, cut - CUT.rim), cut) : above(housing, cut - CUT.rim), false)];
+    if (kept) housingBody.push(place(above(housing, cut), false));
     const capBody = [place(above(cap, cut + CUT.border), true)];
     const capBorder = [place(below(cap, cut + CUT.border), true)];
     if (!throughObject && settings.loopStyle !== "none") {
@@ -1294,9 +1397,13 @@ function modelClicker(settings: ProductSettings, quality: MeshQuality) {
           ? [0, spot.u, spot.v]
           : [spot.u, 0, spot.v]
         : [0, 0, 0];
-    const holeOnCap = spot !== null && holeZ * scale > cut;
+    const holeAt = toCut(holeX, holeY, holeZ);
+    // Over the cut, the hole is on the cap unless it's in a piece left on the housing.
+    const holeReach = curved ? ring + holeRadius : holeRadius + 1;
+    const holeOnCap =
+      spot !== null && holeAt.z > cut && (!kept || overlap(capTop, holeAt, holeReach) >= overlap(kept, holeAt, holeReach));
     warnings.push(
-      `Needs 1 Cherry MX-compatible switch. Print the housing on its bottom and the cap on its plug, with supports under any overhangs. Push the switch into the housing's pocket, then press the cap's socket onto the stem: the cap rests ${CUT.travel} mm up and clicks down to meet the housing.${holeOnCap ? " The keyring pulls on the cap, so glue the cap onto the stem." : ""}`,
+      `Needs 1 Cherry MX-compatible switch. Print the housing on its bottom and the cap on its plug, with supports under any overhangs.${tilted ? " The cut is tilted, so the download lays both parts with the cut flat; turn on supports, or turn the housing in your slicer if its bottom isn't flat." : ""} Push the switch into the housing's pocket, then press the cap's socket onto the stem: the cap rests ${CUT.travel} mm up and clicks down to meet the housing.${holeOnCap ? " The keyring pulls on the cap, so glue the cap onto the stem." : ""}`,
     );
     text.computeBoundingBox();
     base.computeBoundingBox();
@@ -1309,15 +1416,62 @@ function modelClicker(settings: ProductSettings, quality: MeshQuality) {
       const shift = holeOnCap ? capShift.x : 0;
       // A curved tunnel is grabbed anywhere around its ring.
       packed.hole = {
-        x: holeX * scale + shift - cx,
-        y: holeY * scale - cy,
-        z: holeZ * scale + lift - all.min.z,
+        x: holeAt.x + shift - cx,
+        y: holeAt.y - cy,
+        z: holeAt.z + lift - all.min.z,
         radius: curved ? ring + holeRadius : holeRadius,
         axis: model.side.axis,
-        unit: scale,
+        unit,
         u: spot.u,
         v: spot.v,
       };
+      if (frame) {
+        // The frame's turn without its scale, transposed: shown directions back to the upload's.
+        const turnBack = new THREE.Matrix3().setFromMatrix4(frame).multiplyScalar(1 / plan.model.factor);
+        packed.hole.basis = Array.from(turnBack.elements);
+      }
+    }
+    if (preview) {
+      // From the flat cut's mm back to the upload upright in mm.
+      const toEditor = new THREE.Matrix4()
+        .makeScale(1 / scale, 1 / scale, 1 / scale)
+        .premultiply(fromCutUnits)
+        .premultiply(new THREE.Matrix4().makeScale(unit, unit, unit));
+      const editorPoint = (x: number, y: number, z: number) => new THREE.Vector3(x, y, z).applyMatrix4(toEditor);
+      const source = plainGeometry(solidPositions(drilledSolid));
+      source.scale(unit, unit, unit);
+      const normal = cutNormal(tilt, turn);
+      const point = editorPoint(0, 0, cut);
+      const editor: ModelCutEditor = {
+        source,
+        normal: [normal.x, normal.y, normal.z],
+        point: [point.x, point.y, point.z],
+        tilt,
+        turn,
+        unit,
+        pieces: pieces.map((piece) => {
+          const positions = solidPositions(piece);
+          let topmost = 2;
+          for (let index = 5; index < positions.length; index += 3) if (positions[index] > positions[topmost]) topmost = index;
+          const at = new THREE.Vector3(positions[topmost - 2], positions[topmost - 1], positions[topmost])
+            .multiplyScalar(1 / scale)
+            .applyMatrix4(fromCutUnits);
+          const geometry = plainGeometry(positions);
+          geometry.applyMatrix4(toEditor);
+          geometry.computeVertexNormals();
+          const section = keep(piece.slice(cut + 0.02));
+          const outline = section.toPolygons().map((ring) => {
+            const flat = new Float32Array(ring.length * 3);
+            ring.forEach(([x, y], index) => {
+              const shown = editorPoint(x, y, cut + 0.02);
+              flat.set([shown.x, shown.y, shown.z], index * 3);
+            });
+            return flat;
+          });
+          return { geometry, cap: capPieces.includes(piece), at: { x: at.x, y: at.y, z: at.z }, outline };
+        }),
+      };
+      packed.cutEditor = editor;
     }
     if (apart) {
       for (const geometry of [apart.housing.text, apart.housing.base, apart.cap.text, apart.cap.base]) {

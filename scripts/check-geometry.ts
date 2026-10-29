@@ -28,11 +28,15 @@ import { bounds, clickerLayout, clickerLayoutInput, HOUSING_SHAPES, partsLayout 
 import { registerImageParts } from "../lib/image-parts";
 import { buildKeychain, disposeModel } from "../lib/geometry";
 import { exportKeychain } from "../lib/export";
-import { drilled as drilledSolid, ensureManifold, manifoldKernel } from "../lib/manifold";
+import { drilled as drilledSolid, ensureManifold, manifoldKernel, solidPositions } from "../lib/manifold";
+import { repairMesh, type MeshRepair } from "../lib/mesh-repair";
+import { SurfaceMap } from "../lib/smart-fill";
 import {
   clickerPlan,
   CUT,
+  cutFrameModel,
   ensureSampleModel,
+  importedModel,
   registerModel,
   SAMPLE_MODEL,
   smallestSize,
@@ -63,6 +67,35 @@ const defaults = {
   holeOffsetX: 0,
   holeOffsetY: 0,
 };
+
+// Smart fill splits at sharp edges and suggests a cut that takes the clicked region off.
+function assertSmartFill() {
+  const box = (w: number, d: number, h: number, x: number, y: number, z: number) =>
+    new THREE.BoxGeometry(w, d, h).toNonIndexed().translate(x, y, z).getAttribute("position").array as Float32Array;
+  const tall = box(20, 20, 40, 0, 0, 20);
+  const cube = new SurfaceMap(tall);
+  const count = (labels: Int32Array) => new Set(labels).size;
+  if (count(cube.labels(30)) !== 6) throw new Error(`a box should be 6 smart-fill regions, got ${count(cube.labels(30))}`);
+  if (count(cube.labels(90)) !== 1) throw new Error("a box at 90° should be one region");
+  const labels = cube.labels(30);
+  const topFace = labels.findIndex((_, face) => cube.normals[face * 3 + 2] > 0.99);
+  const top = cube.suggestCut(labels, labels[topFace]);
+  if (!top || top.tilt !== 0 || Math.abs(top.offset - 39.6) > 1e-3) throw new Error(`top face cut is off: ${JSON.stringify(top)}`);
+  if (cube.outline(labels, labels[topFace]).length !== 4 * 6) throw new Error("the top face's outline should be its 4 edges");
+  if (cube.suggestCut(cube.labels(90), cube.labels(90)[0])) throw new Error("a region that is the whole model can't be cut off");
+
+  // A handle sticking out to +x comes off with a cut facing about +x.
+  const handle = box(10, 6, 6, 15, 0, 20);
+  const both = new Float32Array(tall.length + handle.length);
+  both.set(tall);
+  both.set(handle, tall.length);
+  const cup = new SurfaceMap(both);
+  const merged = cup.labels(90);
+  const side = cup.suggestCut(merged, merged[tall.length / 9]);
+  if (!side || side.normal[0] < 0.7 || side.at[0] < 19.9) {
+    throw new Error(`handle cut is off: ${JSON.stringify(side)}`);
+  }
+}
 
 function parseFont(file: string) {
   const buffer = readFileSync(file);
@@ -170,6 +203,7 @@ async function main() {
   second.base.dispose();
   holeless.text.dispose();
   holeless.base.dispose();
+  assertSmartFill();
   console.log("geometry ok");
 }
 
@@ -355,6 +389,131 @@ async function assertModelClicker() {
       throw new Error("3D clicker tunnel didn't change direction");
     }
   }
+  // A tilted cut: the model is turned so the cut lies flat, at the same object size.
+  const sideways = cutFrameModel(cubeId, 90, 0);
+  if (Math.abs(importedModel(sideways)!.height - importedModel(cubeId)!.height) > 0.01) {
+    throw new Error("3D clicker cube turned on its side changed height");
+  }
+  const tiltedBuilds = [
+    { modelCutTilt: 90, modelCutTurn: 0 },
+    { modelCutTilt: 45, modelCutTurn: 30 },
+    { modelCutTilt: 180, modelCutTurn: 0 },
+  ].map((direction) => {
+    const built = buildProduct("model-clicker", null, { ...settings, ...direction }, "preview");
+    if (openEdges(built.text) || openEdges(built.base)) throw new Error(`3D clicker cut tilted ${direction.modelCutTilt}° is not watertight`);
+    const editor = built.cutEditor;
+    if (!editor) throw new Error("3D clicker preview has no cut editor");
+    const normal = new THREE.Vector3(...editor.normal);
+    const expected = new THREE.Vector3(
+      Math.sin((direction.modelCutTilt * Math.PI) / 180) * Math.cos((direction.modelCutTurn * Math.PI) / 180),
+      Math.sin((direction.modelCutTilt * Math.PI) / 180) * Math.sin((direction.modelCutTurn * Math.PI) / 180),
+      Math.cos((direction.modelCutTilt * Math.PI) / 180),
+    );
+    if (normal.distanceTo(expected) > 1e-6) throw new Error("3D clicker cut editor faces the wrong way");
+    // Every piece over the cut is on the cap's side of the shown plane.
+    const point = new THREE.Vector3(...editor.point);
+    for (const piece of editor.pieces) {
+      const position = piece.geometry.getAttribute("position");
+      for (let index = 0; index < position.count; index += 97) {
+        const side = new THREE.Vector3().fromBufferAttribute(position, index).sub(point).dot(normal);
+        if (side < -0.05) throw new Error(`3D clicker piece tilted ${direction.modelCutTilt}° is under the cut`);
+      }
+    }
+    return built;
+  });
+  const flatCube = new THREE.Box3().setFromBufferAttribute(preview.text.getAttribute("position") as THREE.BufferAttribute);
+  const sideCube = new THREE.Box3().setFromBufferAttribute(tiltedBuilds[0].text.getAttribute("position") as THREE.BufferAttribute);
+  if (Math.abs(sideCube.getSize(new THREE.Vector3()).y - flatCube.getSize(new THREE.Vector3()).y) > 0.5) {
+    throw new Error("3D clicker cube cut sideways isn't the same size");
+  }
+
+  // A U: a cut through both prongs leaves two pieces over it. The biggest goes with the cap
+  // on its own, the other stays on the housing, and either can be picked instead.
+  const { Manifold: UKernel } = manifoldKernel();
+  const base = UKernel.cube([100, 40, 30], true).translate(0, 0, 15);
+  const left = UKernel.cube([40, 40, 40.1], true).translate(-30, 0, 50);
+  const right = UKernel.cube([36, 40, 40.1], true).translate(31, 0, 50);
+  const u = UKernel.union([base, left, right]);
+  const uId = registerModel("U", solidPositions(u));
+  for (const item of [base, left, right, u]) item.delete();
+  const uSettings = { ...settings, modelId: uId, housingSize: 100, modelCut: 0.75 };
+  const uAuto = buildProduct("model-clicker", null, uSettings, "preview");
+  const uPieces = uAuto.cutEditor?.pieces ?? [];
+  if (uPieces.length !== 2 || uPieces.filter((piece) => piece.cap).length !== 1) {
+    throw new Error(`3D clicker U cut into ${uPieces.length} pieces with ${uPieces.filter((piece) => piece.cap).length} on the cap`);
+  }
+  const bigger = uPieces.find((piece) => piece.cap)!;
+  const other = uPieces.find((piece) => !piece.cap)!;
+  if (bigger.at.x > 0) throw new Error("3D clicker U didn't put the bigger prong on the cap");
+  if (!bigger.outline.length || !other.outline.length) throw new Error("3D clicker U pieces have no outline");
+  const uPrint = buildProduct("model-clicker", null, uSettings, "print");
+  if (openEdges(uPrint.text) || openEdges(uPrint.base)) throw new Error("3D clicker U with a piece left on the housing is not watertight");
+  const uOther = buildProduct("model-clicker", null, { ...uSettings, modelCutParts: [other.at] }, "preview");
+  const switched = uOther.cutEditor!.pieces;
+  if (!switched.find((piece) => piece.cap && piece.at.x > 0) || switched.filter((piece) => piece.cap).length !== 1) {
+    throw new Error("3D clicker U didn't move the cap to the picked prong");
+  }
+  if (uOther.cut && uAuto.cut && Math.abs(uOther.cut.mm - uAuto.cut.mm) > 0.01) throw new Error("3D clicker U cut moved when picking a piece");
+  const uBoth = buildProduct("model-clicker", null, { ...uSettings, modelCutParts: [other.at, bigger.at] }, "print");
+  if (!uBoth.warnings.some((warning) => warning.includes("print loose"))) throw new Error("3D clicker U with both prongs didn't warn they're loose");
+  if (openEdges(uBoth.text) || openEdges(uBoth.base)) throw new Error("3D clicker U with both prongs is not watertight");
+  for (const built of [...tiltedBuilds, uAuto, uPrint, uOther, uBoth]) disposeModel(built);
+
+  // Broken uploads are repaired: small gaps and loose bits welded, holes rebuilt.
+  const box = (size: number, x = 0) => {
+    const geometry = new THREE.BoxGeometry(size, size, size).toNonIndexed();
+    geometry.translate(x, 0, size / 2);
+    const positions = Float32Array.from(geometry.getAttribute("position").array);
+    geometry.dispose();
+    return positions;
+  };
+  const joined = (...parts: Float32Array[]) => {
+    const all = new Float32Array(parts.reduce((sum, part) => sum + part.length, 0));
+    let at = 0;
+    for (const part of parts) {
+      all.set(part, at);
+      at += part.length;
+    }
+    return all;
+  };
+  const gapped = box(40).map((value, index) => (index % 7 === 0 ? value + 1e-4 : value));
+  const loose = joined(box(40), Float32Array.from([60, 0, 0, 70, 0, 0, 60, 10, 0]));
+  const touching = joined(box(40), box(40, 40));
+  const holed = box(40).slice(9);
+  // Half the top missing and a cut-through slit in a side: the slit's edges don't pair up
+  // into a clean loop, so it has to be rebuilt.
+  const top = box(40);
+  const broken = joined(top.slice(0, 9 * 4), top.slice(9 * 5));
+  broken[0] += 3;
+  const cases: [string, Float32Array, MeshRepair["kind"] | null, number][] = [
+    ["clean", box(40), null, 64000],
+    ["gapped", gapped, "welded", 64000],
+    ["loose bit", loose, "welded", 64000],
+    ["touching parts", touching, null, 128000],
+    ["missing triangle", holed, "welded", 64000],
+    ["torn", broken, "rebuilt", 64000],
+  ];
+  const { Manifold: Kernel, Mesh } = manifoldKernel();
+  for (const [name, positions, kind, volume] of cases) {
+    const started = performance.now();
+    const fixed = await repairMesh(positions);
+    if ((fixed.repair?.kind ?? null) !== kind) throw new Error(`Repairing a ${name} model gave ${fixed.repair?.kind ?? "nothing"}`);
+    const triangles = Uint32Array.from({ length: fixed.positions.length / 3 }, (_, index) => index);
+    const mesh = new Mesh({ numProp: 3, vertProperties: fixed.positions, triVerts: triangles });
+    mesh.merge();
+    const solid = new Kernel(mesh);
+    const got = solid.volume();
+    solid.delete();
+    if (Math.abs(got - volume) > volume * 0.08) throw new Error(`Repaired ${name} model holds ${got.toFixed(0)} mm³, not ${volume}`);
+    console.log(`  repaired ${name}: ${fixed.repair?.kind ?? "as is"}, ${Math.round(performance.now() - started)} ms`);
+  }
+  const rebuiltId = registerModel("Torn cube", (await repairMesh(broken)).positions, { kind: "rebuilt", detail: 0.3 });
+  const rebuiltClicker = buildProduct("model-clicker", null, { ...settings, modelId: rebuiltId }, "print");
+  if (openEdges(rebuiltClicker.text) || !rebuiltClicker.warnings.some((warning) => warning.includes("rebuilt"))) {
+    throw new Error("Rebuilt 3D clicker model didn't cut cleanly or say it was rebuilt");
+  }
+  disposeModel(rebuiltClicker);
+
   const sample = buildProduct("model-clicker", null, product.settings, "preview");
   console.log("model-clicker cube", print.width.toFixed(1), "x", print.height.toFixed(1), "x", print.depth.toFixed(1), "sample from", least, "mm");
   for (const built of [print, preview, lower, straight, drilled, moved, ...tipped, sample]) disposeModel(built);

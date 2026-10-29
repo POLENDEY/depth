@@ -6,6 +6,7 @@ import { bounds, type Pt } from "@/lib/clicker-layout";
 import {
   clickerPlan,
   CUT,
+  cutFrameModel,
   ensureSampleModel,
   importedModel,
   importModel,
@@ -26,31 +27,43 @@ type Props = {
 };
 
 const MAP_MARGIN = 4;
+const CUT_PRESETS = [
+  { label: "Flat", tilt: 0, turn: 0 },
+  { label: "Left | right", tilt: 90, turn: 0 },
+  { label: "Front | back", tilt: 90, turn: 90 },
+];
 
 export function ModelField({ slug, label, settings, patch, onError }: Props) {
   const [importing, setImporting] = useState(false);
   const [dragging, setDragging] = useState<{ offset: Pt; at: Pt } | null>(null);
   const svg = useRef<SVGSVGElement>(null);
   const id = settings.modelId || SAMPLE_MODEL;
+  const tilt = settings.modelCutTilt ?? 0;
+  const turn = settings.modelCutTurn ?? 0;
 
   const planned = useMemo(() => {
     try {
       ensureSampleModel();
       const least = smallestSize(id);
-      const plan = clickerPlan(id, settings.housingSize, settings.modelCut, settings.modelSwitch);
+      const plan = clickerPlan(cutFrameModel(id, tilt, turn), settings.housingSize, settings.modelCut, settings.modelSwitch);
       return { least, plan, section: sliceRings(plan, plan.cut), area: switchArea(plan), error: null };
     } catch (reason) {
       return { least: null, plan: null, section: [], area: [], error: reason instanceof Error ? reason.message : "Could not fit a switch." };
     }
-  }, [id, settings.housingSize, settings.modelCut, settings.modelSwitch]);
+  }, [id, tilt, turn, settings.housingSize, settings.modelCut, settings.modelSwitch]);
   const { plan } = planned;
   const name = importedModel(id)?.name ?? "Star";
+
+  function turnCut(nextTilt: number, nextTurn: number) {
+    if (nextTilt === tilt && nextTurn === turn) return;
+    patch({ modelCutTilt: nextTilt, modelCutTurn: nextTurn, modelSwitch: null, modelCutParts: null });
+  }
 
   async function onUpload(file: File) {
     setImporting(true);
     try {
       const modelId = await importModel(file);
-      patch({ modelId, modelHole: null, modelCut: 0, modelSwitch: null });
+      patch({ modelId, modelHole: null, modelCut: 0, modelSwitch: null, modelCutTilt: 0, modelCutTurn: 0, modelCutParts: null });
       onError(null);
     } catch (reason) {
       onError(reason instanceof Error ? reason.message : "Could not read that 3D model.");
@@ -94,15 +107,69 @@ export function ModelField({ slug, label, settings, patch, onError }: Props) {
           htmlFor={`${slug}-model-file`}
           className="inline-flex h-10 cursor-pointer items-center rounded-lg border border-[#e6e7ec] bg-white px-3 text-sm text-zinc-700 hover:bg-zinc-50"
         >
-          {importing ? "Reading model…" : "Upload 3D model"}
+          {importing ? "Reading and repairing…" : "Upload 3D model"}
         </label>
         <span className="min-w-0 truncate text-xs text-zinc-500" title={name}>
           {settings.modelId ? name : `Sample: ${name}`}
         </span>
       </div>
       <span className="mt-1 block text-xs text-zinc-400">
-        STL, OBJ, GLB, glTF, or 3MF, as a closed solid. It&apos;s cut flat in two: the top clicks down on a switch hidden in the bottom.
+        STL, OBJ, GLB, glTF, or 3MF. Gaps and loose surfaces are repaired automatically. It&apos;s cut in two: the top clicks
+        down on a switch hidden in the bottom. Use Edit cut in the preview to turn the cut at any angle and pick which pieces
+        click.
       </span>
+
+      <div className="mt-3 flex items-center justify-between gap-2">
+        <span>Cut angle</span>
+        <div className="flex gap-1">
+          {CUT_PRESETS.map((preset) => (
+            <button
+              key={preset.label}
+              type="button"
+              aria-pressed={tilt === preset.tilt && turn === preset.turn}
+              onClick={() => turnCut(preset.tilt, preset.turn)}
+              className="h-8 rounded-lg border border-[#e6e7ec] bg-white px-2 text-xs text-zinc-700 hover:bg-zinc-50 aria-pressed:border-blue-600 aria-pressed:text-blue-700"
+            >
+              {preset.label}
+            </button>
+          ))}
+        </div>
+      </div>
+      <SliderRow
+        label="Tilt"
+        unit="°"
+        min={0}
+        max={180}
+        step={1}
+        value={Math.round(tilt)}
+        onChange={(value) => turnCut(value, turn)}
+        hint="How far the cut leans from flat: 90° cuts straight down the side, 180° flips the cap to the bottom."
+      />
+      <SliderRow
+        label="Turn"
+        unit="°"
+        min={0}
+        max={359}
+        step={1}
+        value={Math.round(turn)}
+        onChange={(value) => turnCut(tilt, value)}
+        hint="Which way the lean faces, around the model."
+      />
+      <div className="mt-2 flex items-center justify-between gap-2">
+        <span className="text-xs text-zinc-500">
+          {settings.modelCutParts?.length
+            ? `Cap: ${settings.modelCutParts.length} picked piece${settings.modelCutParts.length > 1 ? "s" : ""}`
+            : "Cap: the biggest piece over the cut"}
+        </span>
+        <button
+          type="button"
+          disabled={!settings.modelCutParts?.length}
+          onClick={() => patch({ modelCutParts: null, modelSwitch: null })}
+          className="h-8 rounded-lg border border-[#e6e7ec] bg-white px-3 text-xs text-zinc-700 hover:bg-zinc-50 disabled:opacity-40"
+        >
+          Auto
+        </button>
+      </div>
       {planned.error ? <span className="mt-2 block text-xs text-red-500">{planned.error}</span> : null}
 
       {plan && planned.least ? (
@@ -207,8 +274,10 @@ function SliderRow({
   value,
   onChange,
   hint,
+  unit = "mm",
 }: {
   label: string;
+  unit?: string;
   min: number;
   max: number;
   step: number;
@@ -233,7 +302,7 @@ function SliderRow({
         />
         <input
           key={shown}
-          aria-label={`${label} in mm`}
+          aria-label={`${label} in ${unit === "°" ? "degrees" : unit}`}
           type="number"
           min={min}
           max={max}
@@ -249,7 +318,7 @@ function SliderRow({
           }}
           className="h-8 w-16 rounded-lg border border-[#e6e7ec] bg-[#fafafa] px-2 text-sm"
         />
-        <span className="text-xs text-zinc-400">mm</span>
+        <span className="w-5 text-xs text-zinc-400">{unit}</span>
       </label>
       <span className="block text-xs text-zinc-400">{hint}</span>
     </>

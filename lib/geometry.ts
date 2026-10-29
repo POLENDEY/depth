@@ -45,6 +45,26 @@ export type KeychainModel = {
   hole: ModelHole | null;
   cut?: ModelCut;
   assembly?: ModelAssembly;
+  cutEditor?: ModelCutEditor;
+};
+
+// The uncut model upright as uploaded (mm, centered, on z = 0), for tilting the cut in
+// place: the cut plane through `point` facing `normal` (into the cap), and each piece of
+// the model over the cut with whether it goes with the cap, a point on it in model units
+// (`unit` mm each), and its outline on the cut. `tilt` and `turn` are the cut it shows.
+export type ModelCutEditor = {
+  source: THREE.BufferGeometry;
+  normal: [number, number, number];
+  point: [number, number, number];
+  tilt: number;
+  turn: number;
+  unit: number;
+  pieces: {
+    geometry: THREE.BufferGeometry;
+    cap: boolean;
+    at: { x: number; y: number; z: number };
+    outline: Float32Array[];
+  }[];
 };
 
 // Where a model splits into cap and housing, for dragging the cut up and down: `z` is
@@ -64,6 +84,10 @@ export type ModelAssembly = {
 export function disposeModel(model: KeychainModel) {
   model.text.dispose();
   model.base.dispose();
+  if (model.cutEditor) {
+    model.cutEditor.source.dispose();
+    for (const piece of model.cutEditor.pieces) piece.geometry.dispose();
+  }
   if (!model.assembly) return;
   for (const part of [model.assembly.housing, model.assembly.cap]) {
     part.text.dispose();
@@ -73,7 +97,9 @@ export function disposeModel(model: KeychainModel) {
 
 // A draggable hole. Flat ones run up through the part at (x, y). Ones with an `axis` run
 // sideways through (x, y, z), and drag across the plane facing that axis; `unit` is mm per
-// setting unit and (u, v) the setting's current value, across and up.
+// setting unit and (u, v) the setting's current value, across and up. When the part is
+// shown turned (a tilted cut), `basis` (row-major 3x3) turns shown directions back into the
+// upload's.
 export type ModelHole = {
   x: number;
   y: number;
@@ -83,6 +109,7 @@ export type ModelHole = {
   unit?: number;
   u?: number;
   v?: number;
+  basis?: number[];
 };
 
 type Point = { x: number; y: number };

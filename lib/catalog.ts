@@ -9,6 +9,7 @@ export type LinkStyle = "tile" | "block";
 export type LoopStyle = "tab" | "ring" | "heart" | "star" | "corner" | "object" | "none";
 export type LoopSide = "left" | "right";
 export type ModelHoleShape = "straight" | "torus";
+export type Pt3 = { x: number; y: number; z: number };
 
 export type SurfacePattern = "plain" | "ribs" | "stripes" | "waves" | "diamond" | "dots";
 export type SurfaceOn = "both" | "housing" | "caps";
@@ -134,6 +135,13 @@ export type ProductSettings = {
   // and the switch's spot in model units (null = auto).
   modelCut: number;
   modelSwitch: Pt | null;
+  // The cut's direction in degrees: tipped from flat (0) through upright (90) to upside
+  // down (180), and turned around the vertical.
+  modelCutTilt: number;
+  modelCutTurn: number;
+  // A point (model units) on each piece over the cut that goes with the cap; the others
+  // stay on the housing. null takes the biggest piece.
+  modelCutParts: Pt3[] | null;
   charms: CharmPlacement[];
   charmBase: number;
   tagSize: number;
@@ -210,6 +218,9 @@ const shared = {
   modelHoleTurn: 0,
   modelCut: 0,
   modelSwitch: null as Pt | null,
+  modelCutTilt: 0,
+  modelCutTurn: 0,
+  modelCutParts: null as Pt3[] | null,
   charms: [] as CharmPlacement[],
   charmBase: 1.2,
   tagSize: 48,
