@@ -1048,12 +1048,17 @@ function clickerKeychain(font: Font, settings: ProductSettings, quality: MeshQua
 
 const LOOP_SINK = 0.5;
 
-// The keyring loop on the housing outline's end facing the chosen side or back corner.
-function placedLoop(settings: ProductSettings, outline: Pt[], holeRadius: number, fine: number) {
+// Where the keyring loop joins the outline: the middle of its end facing the chosen side,
+// back corner, or dragged direction.
+function loopAnchor(settings: ProductSettings, outline: Pt[]) {
   const side = settings.loopSide === "right" ? 1 : -1;
-  const style = settings.loopStyle === "corner" ? "tab" : settings.loopStyle;
-  const direction = settings.loopStyle === "corner" ? { x: side * Math.SQRT1_2, y: Math.SQRT1_2 } : { x: side, y: 0 };
-  // The middle of the outline's flat or rounded end facing `direction`.
+  const angle = settings.loopAngle;
+  const direction =
+    angle !== null && angle !== undefined
+      ? { x: Math.cos((angle * Math.PI) / 180), y: Math.sin((angle * Math.PI) / 180) }
+      : settings.loopStyle === "corner"
+        ? { x: side * Math.SQRT1_2, y: Math.SQRT1_2 }
+        : { x: side, y: 0 };
   const reach = (point: Pt) => point.x * direction.x + point.y * direction.y;
   const farthest = Math.max(...outline.map(reach));
   const end = outline.filter((point) => reach(point) > farthest - 0.5);
@@ -1061,6 +1066,12 @@ function placedLoop(settings: ProductSettings, outline: Pt[], holeRadius: number
     x: end.reduce((sum, point) => sum + point.x, 0) / end.length,
     y: end.reduce((sum, point) => sum + point.y, 0) / end.length,
   };
+  return { anchor, direction };
+}
+
+function placedLoop(settings: ProductSettings, outline: Pt[], holeRadius: number, fine: number) {
+  const style = settings.loopStyle === "corner" ? "tab" : settings.loopStyle;
+  const { anchor, direction } = loopAnchor(settings, outline);
   return clickerLoop(style, holeRadius, fine).map((part) =>
     part
       .rotateZ(Math.atan2(direction.y, direction.x) - Math.PI)
@@ -1357,13 +1368,32 @@ function modelClicker(settings: ProductSettings, quality: MeshQuality) {
     const above = (part: Solid, z: number) => keep(part.trimByPlane([0, 0, 1], z));
     const housingBox = housing.boundingBox();
     const capBox = cap.boundingBox();
-    // Side by side on the bed, each on its flat bottom.
-    const capShift = { x: housingBox.max[0] + 6 - capBox.min[0], z: -(cut - CUT.plug) };
-    const place = (part: Solid, onCap: boolean) => {
-      const geometry = plainGeometry(solidPositions(part));
-      if (onCap) geometry.translate(capShift.x, 0, capShift.z);
-      return geometry;
+    // From the flat cut's mm back to the upload upright in mm.
+    const toEditor = new THREE.Matrix4()
+      .makeScale(1 / scale, 1 / scale, 1 / scale)
+      .premultiply(fromCutUnits)
+      .premultiply(new THREE.Matrix4().makeScale(unit, unit, unit));
+    // Side by side on the bed, the cap on its plug with the cut flat. A tilted cut's preview
+    // keeps the housing in the model's pose, resting on its lowest point; the download lays
+    // it with the cut flat too.
+    const upright = preview && frame ? toEditor : null;
+    const housingMove = new THREE.Vector3();
+    const capMove = new THREE.Vector3(housingBox.max[0] + 6 - capBox.min[0], 0, -(cut - CUT.plug));
+    if (upright) {
+      const housingUp = keep(housing.transform(upright.elements as Parameters<Solid["transform"]>[0])).boundingBox();
+      housingMove.set(0, 0, -housingUp.min[2]);
+      capMove.set(
+        housingUp.max[0] + 6 - capBox.min[0],
+        (housingUp.min[1] + housingUp.max[1]) / 2 - (capBox.min[1] + capBox.max[1]) / 2,
+        -(cut - CUT.plug),
+      );
+    }
+    const show = (geometry: THREE.BufferGeometry, onCap: boolean) => {
+      if (upright && !onCap) geometry.applyMatrix4(upright);
+      const move = onCap ? capMove : housingMove;
+      return geometry.translate(move.x, move.y, move.z);
     };
+    const place = (part: Solid, onCap: boolean) => show(plainGeometry(solidPositions(part)), onCap);
     const housingBody = [place(below(housing, cut - CUT.rim), false)];
     // Pieces left on the housing over the cut keep the object's color; only the band at the
     // cut takes the border's.
@@ -1371,12 +1401,26 @@ function modelClicker(settings: ProductSettings, quality: MeshQuality) {
     if (kept) housingBody.push(place(above(housing, cut), false));
     const capBody = [place(above(cap, cut + CUT.border), true)];
     const capBorder = [place(below(cap, cut + CUT.border), true)];
+    // Where the keyring loop is grabbed and which way it's dragged around, in the flat cut's mm.
+    let loopGrab: { center: THREE.Vector3; reach: number; middle: THREE.Vector3 } | null = null;
     if (!throughObject && settings.loopStyle !== "none") {
       const outline = bottomOutline(plan);
       if (outline.length >= 3) {
-        for (const loop of placedLoop(settings, outline, holeRadius, fine)) {
+        const loops = placedLoop(settings, outline, holeRadius, fine);
+        const loopBox = new THREE.Box3();
+        for (const loop of loops) {
+          loop.computeBoundingBox();
+          loopBox.union(loop.boundingBox!);
+        }
+        const ends = bounds(outline);
+        loopGrab = {
+          center: loopBox.getCenter(new THREE.Vector3()),
+          reach: loopBox.getSize(new THREE.Vector3()).length() / 2 + 1,
+          middle: new THREE.Vector3((ends.minX + ends.maxX) / 2, (ends.minY + ends.maxY) / 2, 0),
+        };
+        for (const loop of loops) {
           const flat = loop.index ? loop.toNonIndexed() : loop;
-          housingBody.push(plainGeometry(Float32Array.from(flat.getAttribute("position").array)));
+          housingBody.push(show(plainGeometry(Float32Array.from(flat.getAttribute("position").array)), false));
           flat.dispose();
           loop.dispose();
         }
@@ -1403,7 +1447,7 @@ function modelClicker(settings: ProductSettings, quality: MeshQuality) {
     const holeOnCap =
       spot !== null && holeAt.z > cut && (!kept || overlap(capTop, holeAt, holeReach) >= overlap(kept, holeAt, holeReach));
     warnings.push(
-      `Needs 1 Cherry MX-compatible switch. Print the housing on its bottom and the cap on its plug, with supports under any overhangs.${tilted ? " The cut is tilted, so the download lays both parts with the cut flat; turn on supports, or turn the housing in your slicer if its bottom isn't flat." : ""} Push the switch into the housing's pocket, then press the cap's socket onto the stem: the cap rests ${CUT.travel} mm up and clicks down to meet the housing.${holeOnCap ? " The keyring pulls on the cap, so glue the cap onto the stem." : ""}`,
+      `Needs 1 Cherry MX-compatible switch. Print the housing on its bottom and the cap on its plug, with supports under any overhangs.${tilted ? " The cut is tilted: the preview keeps the model's pose, but the download lays both parts with the cut flat; turn on supports, or turn the housing in your slicer if its bottom isn't flat." : ""} Push the switch into the housing's pocket, then press the cap's socket onto the stem: the cap rests ${CUT.travel} mm up and clicks down to meet the housing.${holeOnCap ? " The keyring pulls on the cap, so glue the cap onto the stem." : ""}`,
     );
     text.computeBoundingBox();
     base.computeBoundingBox();
@@ -1412,31 +1456,44 @@ function modelClicker(settings: ProductSettings, quality: MeshQuality) {
     const cx = (all.min.x + all.max.x) / 2;
     const cy = (all.min.y + all.max.y) / 2;
     if (spot) {
-      const lift = holeOnCap ? capShift.z : 0;
-      const shift = holeOnCap ? capShift.x : 0;
+      const holeShown = holeAt.clone();
+      if (upright && !holeOnCap) holeShown.applyMatrix4(upright);
+      holeShown.add(holeOnCap ? capMove : housingMove);
       // A curved tunnel is grabbed anywhere around its ring.
       packed.hole = {
-        x: holeAt.x + shift - cx,
-        y: holeAt.y - cy,
-        z: holeAt.z + lift - all.min.z,
+        x: holeShown.x - cx,
+        y: holeShown.y - cy,
+        z: holeShown.z - all.min.z,
         radius: curved ? ring + holeRadius : holeRadius,
         axis: model.side.axis,
         unit,
         u: spot.u,
         v: spot.v,
       };
-      if (frame) {
+      if (frame && (!upright || holeOnCap)) {
         // The frame's turn without its scale, transposed: shown directions back to the upload's.
         const turnBack = new THREE.Matrix3().setFromMatrix4(frame).multiplyScalar(1 / plan.model.factor);
         packed.hole.basis = Array.from(turnBack.elements);
       }
     }
+    if (preview && loopGrab) {
+      const shown = (point: THREE.Vector3) => {
+        const out = point.clone();
+        if (upright) out.applyMatrix4(upright);
+        return out.add(housingMove).sub(new THREE.Vector3(cx, cy, all.min.z)).toArray();
+      };
+      const turnOnly = upright ? new THREE.Matrix3().setFromMatrix4(upright) : new THREE.Matrix3();
+      const along = (x: number, y: number, z: number) => new THREE.Vector3(x, y, z).applyMatrix3(turnOnly).normalize().toArray();
+      packed.loop = {
+        center: shown(loopGrab.center),
+        reach: loopGrab.reach,
+        middle: shown(loopGrab.middle),
+        normal: along(0, 0, 1),
+        u: along(1, 0, 0),
+        v: along(0, 1, 0),
+      };
+    }
     if (preview) {
-      // From the flat cut's mm back to the upload upright in mm.
-      const toEditor = new THREE.Matrix4()
-        .makeScale(1 / scale, 1 / scale, 1 / scale)
-        .premultiply(fromCutUnits)
-        .premultiply(new THREE.Matrix4().makeScale(unit, unit, unit));
       const editorPoint = (x: number, y: number, z: number) => new THREE.Vector3(x, y, z).applyMatrix4(toEditor);
       const source = plainGeometry(solidPositions(drilledSolid));
       source.scale(unit, unit, unit);
@@ -1477,9 +1534,32 @@ function modelClicker(settings: ProductSettings, quality: MeshQuality) {
       for (const geometry of [apart.housing.text, apart.housing.base, apart.cap.text, apart.cap.base]) {
         geometry.translate(-cx, -cy, -all.min.z);
       }
-      packed.cut = { z: cut - all.min.z, minX: housingBox.min[0] - cx, maxX: housingBox.max[0] - cx, mm: cut, height: plan.height };
+      // Dragged up and down, the cut only makes sense where it's shown flat.
+      if (!upright) {
+        packed.cut = { z: cut - all.min.z, minX: housingBox.min[0] - cx, maxX: housingBox.max[0] - cx, mm: cut, height: plan.height };
+      }
       // Assembled, the switch holds the cap up by the travel gap; a full press closes all but 0.3 mm.
-      packed.assembly = { ...apart, offset: { x: -capShift.x, y: 0, z: -capShift.z + CUT.travel }, press: 4 };
+      // A tilted cut's cap also turns from lying on its plug to the housing's pose.
+      const axis = upright ? cutNormal(tilt, turn) : new THREE.Vector3(0, 0, 1);
+      const shift = new THREE.Vector3(cx, cy, all.min.z);
+      const onHousing = new THREE.Matrix4()
+        .makeTranslation(-shift.x, -shift.y, -shift.z)
+        .multiply(new THREE.Matrix4().makeTranslation(housingMove.x, housingMove.y, housingMove.z))
+        .multiply(upright ?? new THREE.Matrix4())
+        .multiply(new THREE.Matrix4().makeTranslation(-capMove.x, -capMove.y, -capMove.z))
+        .multiply(new THREE.Matrix4().makeTranslation(shift.x, shift.y, shift.z));
+      apart.cap.text.computeBoundingBox();
+      const pivot = apart.cap.text.boundingBox!.getCenter(new THREE.Vector3());
+      const offset = pivot.clone().applyMatrix4(onHousing).sub(pivot).addScaledVector(axis, CUT.travel);
+      const spin = new THREE.Quaternion().setFromRotationMatrix(onHousing);
+      packed.assembly = {
+        ...apart,
+        offset: { x: offset.x, y: offset.y, z: offset.z },
+        axis: { x: axis.x, y: axis.y, z: axis.z },
+        pivot: { x: pivot.x, y: pivot.y, z: pivot.z },
+        turn: upright ? [spin.x, spin.y, spin.z, spin.w] : undefined,
+        press: 4,
+      };
     }
     return packed;
   } finally {

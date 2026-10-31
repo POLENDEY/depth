@@ -38,22 +38,40 @@ type ViewerApi = {
 
 // The cap's path in the fit animation (seconds in): up off the bed, over the housing, down
 // onto the switch, then clicking over and over.
-function capPose(time: number, assembly: ModelAssembly, out: THREE.Vector3) {
+// A tilted cut's cap turns over to the housing's pose on the way, then comes on and clicks
+// along the cut's direction.
+const NO_TURN = new THREE.Quaternion();
+function capPose(time: number, assembly: ModelAssembly, cap: THREE.Object3D) {
   const { offset, press } = assembly;
-  const hover = offset.z + 14;
+  const axis = assembly.axis ?? { x: 0, y: 0, z: 1 };
+  const above = { x: offset.x + axis.x * 14, y: offset.y + axis.y * 14, z: offset.z + axis.z * 14 };
+  const lift = Math.max(above.z, 14);
   const ease = (value: number) => {
     const t = Math.min(1, Math.max(0, value));
     return t * t * (3 - 2 * t);
   };
-  if (time < 0.8) return out.set(0, 0, hover * ease(time / 0.8));
-  if (time < 2) {
+  const moved = new THREE.Vector3();
+  let turned = 1;
+  if (time < 0.8) {
+    moved.set(0, 0, lift * ease(time / 0.8));
+    turned = 0;
+  } else if (time < 2) {
     const k = ease((time - 0.8) / 1.2);
-    return out.set(offset.x * k, offset.y * k, hover);
+    moved.set(above.x * k, above.y * k, lift + (above.z - lift) * k);
+    turned = k;
+  } else if (time < 2.9) {
+    const k = ease((time - 2) / 0.9);
+    moved.set(above.x + (offset.x - above.x) * k, above.y + (offset.y - above.y) * k, above.z + (offset.z - above.z) * k);
+  } else {
+    const beat = (time - 2.9) % 1.1;
+    const down = beat < 0.16 ? ease(beat / 0.16) : beat < 0.3 ? 1 : beat < 0.5 ? 1 - ease((beat - 0.3) / 0.2) : 0;
+    moved.set(offset.x - axis.x * press * down, offset.y - axis.y * press * down, offset.z - axis.z * press * down);
   }
-  if (time < 2.9) return out.set(offset.x, offset.y, hover + (offset.z - hover) * ease((time - 2) / 0.9));
-  const beat = (time - 2.9) % 1.1;
-  const down = beat < 0.16 ? ease(beat / 0.16) : beat < 0.3 ? 1 : beat < 0.5 ? 1 - ease((beat - 0.3) / 0.2) : 0;
-  return out.set(offset.x, offset.y, offset.z - press * down);
+  // Turning about the pivot: the group sits at pivot + moved - turn(pivot).
+  const turn = assembly.turn ? new THREE.Quaternion(...assembly.turn) : NO_TURN;
+  cap.quaternion.slerpQuaternions(NO_TURN, turn, turned);
+  const pivot = assembly.pivot ? new THREE.Vector3(assembly.pivot.x, assembly.pivot.y, assembly.pivot.z) : new THREE.Vector3();
+  cap.position.copy(pivot).add(moved).sub(pivot.clone().applyQuaternion(cap.quaternion));
 }
 
 const TOOL =
@@ -80,6 +98,8 @@ type ViewerProps = {
   // A clicked smart-fill region: the cut that takes it off, and a point on it (upload units)
   // that picks its piece for the cap.
   onCutPick?: (tilt: number, turn: number, share: number, at: Pt3) => void;
+  // The keyring loop dragged around the housing: which way it points (degrees).
+  onLoopMove?: (angle: number) => void;
   showDimensions?: boolean;
   onToggleDimensions?: () => void;
 };
@@ -97,6 +117,8 @@ type DragInfo = {
   onCutTransform?: (tilt: number, turn: number, share: number) => void;
   onCutPiece?: (index: number) => void;
   onCutPick?: (tilt: number, turn: number, share: number, at: Pt3) => void;
+  loop?: KeychainModel["loop"];
+  onLoopMove?: (angle: number) => void;
   onCutReadout?: (text: string | null) => void;
   cutTilt?: number;
   cutTurn?: number;
@@ -144,6 +166,7 @@ export function Viewer({
   onCutTransform,
   onCutPiece,
   onCutPick,
+  onLoopMove,
   showDimensions = false,
   onToggleDimensions,
 }: ViewerProps) {
@@ -199,13 +222,15 @@ export function Viewer({
       onCutTransform,
       onCutPiece,
       onCutPick,
+      loop: model?.loop,
+      onLoopMove,
       onCutReadout: setCutReadout,
       cutTilt,
       cutTurn,
       cutShare,
       syncCut,
     };
-  }, [model, charms, onCharmMove, holeX, holeY, onHoleMove, onCutMove, onCutTransform, onCutPiece, onCutPick, cutTilt, cutTurn, cutShare, syncCut]);
+  }, [model, charms, onCharmMove, holeX, holeY, onHoleMove, onCutMove, onCutTransform, onCutPiece, onCutPick, onLoopMove, cutTilt, cutTurn, cutShare, syncCut]);
   useEffect(() => {
     fillAngleRef.current = fillAngle;
     apiRef.current?.cutEditor.setFillAngle(fillAngle);
@@ -387,7 +412,7 @@ export function Viewer({
     resize();
 
     const loop = () => {
-      if (fit.assembly) capPose(performance.now() / 1000 - fit.start, fit.assembly, capGroup.position);
+      if (fit.assembly) capPose(performance.now() / 1000 - fit.start, fit.assembly, capGroup);
       controls.update();
       if (editing.on) {
         if (hoverEvent && !gizmoDrag.active) hover(hoverEvent);
@@ -425,7 +450,7 @@ export function Viewer({
     const pointer = new THREE.Vector2();
     const drag = {
       active: false,
-      target: "charm" as "charm" | "hole" | "cut",
+      target: "charm" as "charm" | "hole" | "cut" | "loop",
       charmIndex: -1,
       pointerId: -1,
       startLocal: new THREE.Vector3(),
@@ -616,19 +641,23 @@ export function Viewer({
       if (event.button !== 0 || event.shiftKey || event.altKey || event.ctrlKey || event.metaKey) return;
       const info = dragRef.current;
       if (fit.assembly) return;
-      if (!info.onCharmMove && !info.onHoleMove && !info.onCutMove) return;
+      if (!info.onCharmMove && !info.onHoleMove && !info.onCutMove && !info.onLoopMove) return;
       setPointer(event);
       raycaster.setFromCamera(pointer, camera);
       const hit = raycaster.intersectObjects([textMesh, baseMesh], false)[0];
       if (!hit) return;
       const local = modelRoot.worldToLocal(hit.point.clone());
-      let target: "charm" | "hole" | "cut" | null = null;
+      let target: "charm" | "hole" | "cut" | "loop" | null = null;
       const hole = info.hole;
       if (hole && info.onHoleMove) {
         const reach = hole.radius + 1.8;
         const away = unturn(hole.basis, new THREE.Vector3(local.x - hole.x, local.y - hole.y, local.z - (hole.z ?? 0)));
         const offset = !hole.axis ? away.x ** 2 + away.y ** 2 : (hole.axis === "x" ? away.y : away.x) ** 2 + away.z ** 2;
         if (offset <= reach ** 2) target = "hole";
+      }
+      const loop = info.loop;
+      if (!target && loop && info.onLoopMove && local.distanceTo(new THREE.Vector3(...loop.center)) <= loop.reach) {
+        target = "loop";
       }
       const cut = info.cut;
       if (
@@ -682,7 +711,11 @@ export function Viewer({
         if (facing.lengthSq() < 1e-6) facing.set(0, 1, 0);
         normal.copy(facing.normalize()).transformDirection(modelRoot.matrixWorld);
       }
-      drag.plane.setFromNormalAndCoplanarPoint(normal, hit.point);
+      if (target === "loop" && loop) {
+        // The loop slides around the housing's bottom, in the plane it lies in.
+        normal.set(...loop.normal).transformDirection(modelRoot.matrixWorld);
+        drag.plane.setFromNormalAndCoplanarPoint(normal, modelRoot.localToWorld(new THREE.Vector3(...loop.middle)));
+      } else drag.plane.setFromNormalAndCoplanarPoint(normal, hit.point);
       userMoved = true;
       controls.enabled = false;
       renderer.domElement.style.cursor = "grabbing";
@@ -710,6 +743,15 @@ export function Viewer({
       const dy = local.y - drag.startLocal.y;
       if (drag.target === "cut") {
         info.onCutMove?.(drag.startX + local.z - drag.startLocal.z);
+        return;
+      }
+      if (drag.target === "loop" && info.loop) {
+        const { middle, u, v } = info.loop;
+        const away = local.clone().sub(new THREE.Vector3(...middle));
+        const across = away.dot(new THREE.Vector3(...u));
+        const up = away.dot(new THREE.Vector3(...v));
+        if (Math.hypot(across, up) < 1) return;
+        info.onLoopMove?.(Math.round(((Math.atan2(up, across) * 180) / Math.PI + 360) % 360));
         return;
       }
       const hole = info.hole;
@@ -817,7 +859,10 @@ export function Viewer({
     const wasAnimating = api.fit.assembly !== null;
     api.fit.assembly = animating ? assembly : null;
     if (animating && !wasAnimating) api.fit.start = performance.now() / 1000;
-    if (!animating) api.capGroup.position.set(0, 0, 0);
+    if (!animating) {
+      api.capGroup.position.set(0, 0, 0);
+      api.capGroup.quaternion.identity();
+    }
     api.fitGroup.visible = animating;
     api.textMesh.visible = !animating && !editing && model !== null;
     api.baseMesh.visible = !animating && !editing && model !== null;

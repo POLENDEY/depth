@@ -46,6 +46,19 @@ export type KeychainModel = {
   cut?: ModelCut;
   assembly?: ModelAssembly;
   cutEditor?: ModelCutEditor;
+  loop?: ModelLoop;
+};
+
+// The keyring loop on a housing, for dragging it around: grabbed within `reach` of
+// `center`, it turns around `middle` in the plane facing `normal`, where `u` points to
+// 0° and `v` to 90°. All as shown (mm).
+export type ModelLoop = {
+  center: [number, number, number];
+  reach: number;
+  middle: [number, number, number];
+  normal: [number, number, number];
+  u: [number, number, number];
+  v: [number, number, number];
 };
 
 // The uncut model upright as uploaded (mm, centered, on z = 0), for tilting the cut in
@@ -72,12 +85,16 @@ export type ModelCutEditor = {
 // `height` in mm.
 export type ModelCut = { z: number; minX: number; maxX: number; mm: number; height: number };
 
-// The parts apart, for animating the fit: the cap moves by `offset` from where it lies
-// to where it sits on the housing, and clicks `press` mm down.
+// The parts apart, for animating the fit: the cap's `pivot` moves by `offset` from where it
+// lies to where it sits on the housing, turning by the `turn` quaternion about it, and
+// clicks `press` mm down along `axis` (the cut's normal as shown; straight up when missing).
 export type ModelAssembly = {
   housing: { text: THREE.BufferGeometry; base: THREE.BufferGeometry };
   cap: { text: THREE.BufferGeometry; base: THREE.BufferGeometry };
   offset: { x: number; y: number; z: number };
+  axis?: { x: number; y: number; z: number };
+  pivot?: { x: number; y: number; z: number };
+  turn?: [number, number, number, number];
   press: number;
 };
 

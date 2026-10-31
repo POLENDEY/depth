@@ -29,6 +29,14 @@ import { formatSize, fromDisplay, toDisplay, type Unit } from "@/lib/units";
 import { UndoRedoControls } from "@/components/undo-redo-controls";
 import { useUndoRedo } from "@/components/use-undo-redo";
 
+// "Drag the cut or the keyring tab to move it · " for whichever can be dragged.
+function dragHint(names: (string | null)[]) {
+  const listed = names.filter((name): name is string => Boolean(name));
+  if (!listed.length) return "";
+  const last = listed.pop();
+  return `Drag ${listed.length ? `${listed.join(", ")} or ${last}` : last} to move it · `;
+}
+
 export function MakerStudio({ slug }: { slug: string }) {
   const product = productBySlug(slug);
   const history = useUndoRedo<ProductSettings | null>(product?.settings ?? null);
@@ -281,6 +289,7 @@ export function MakerStudio({ slug }: { slug: string }) {
                   }
                 : undefined
             }
+            onLoopMove={isModel && visible?.loop ? (angle) => patch({ loopAngle: angle }) : undefined}
             onCutPick={
               isModel
                 ? (tilt, turn, share, at) =>
@@ -298,7 +307,7 @@ export function MakerStudio({ slug }: { slug: string }) {
                 {slug === "magnet" && settings.charms.length
                   ? "Drag an emoji to move it · Drag empty space to orbit"
                   : isModel
-                  ? `Drag the cut${visible?.hole?.axis ? " or the ring hole" : ""} to move it · Edit cut to turn it or pick pieces`
+                  ? `${dragHint([visible?.cut ? "the cut" : null, visible?.hole?.axis ? "the ring hole" : null, visible?.loop ? "the keyring tab" : null])}Edit cut to turn it or pick pieces`
                   : "Drag to orbit · Shift+drag to pan · Scroll to zoom"}
               </p>
             </div>
@@ -519,12 +528,16 @@ export function MakerStudio({ slug }: { slug: string }) {
                   {settings.loopStyle !== "none" && settings.loopStyle !== "object" && (
                     <select
                       aria-label="Hole side"
-                      value={settings.loopSide}
-                      onChange={(event) => patch({ loopSide: event.target.value as ProductSettings["loopSide"] })}
+                      value={settings.loopAngle != null ? "dragged" : settings.loopSide}
+                      onChange={(event) => {
+                        if (event.target.value === "dragged") return;
+                        patch({ loopSide: event.target.value as ProductSettings["loopSide"], loopAngle: null });
+                      }}
                       className="h-10 w-28 rounded-lg border border-[#e6e7ec] bg-[#fafafa] px-2 text-sm"
                     >
                       <option value="left">Left end</option>
                       <option value="right">Right end</option>
+                      {settings.loopAngle != null ? <option value="dragged">Dragged ({settings.loopAngle}°)</option> : null}
                     </select>
                   )}
                 </div>

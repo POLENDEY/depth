@@ -110,6 +110,9 @@ export type ProductSettings = {
   linkStyle: LinkStyle;
   loopStyle: LoopStyle;
   loopSide: LoopSide;
+  // Dragged around the outline: which way the keyring loop points (degrees, 0 = right),
+  // in place of the side.
+  loopAngle: number | null;
   surface: SurfacePattern;
   surfaceOn: SurfaceOn;
   housingShape: HousingShape;
@@ -202,6 +205,7 @@ const shared = {
   linkStyle: "tile" as LinkStyle,
   loopStyle: "tab" as LoopStyle,
   loopSide: "left" as LoopSide,
+  loopAngle: null as number | null,
   surface: "plain" as SurfacePattern,
   surfaceOn: "both" as SurfaceOn,
   housingShape: "rect" as HousingShape,
