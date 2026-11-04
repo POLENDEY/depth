@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo, useRef, useState } from "react";
-import type { ProductSettings } from "@/lib/catalog";
+import type { CapFace, HousingFace, ProductSettings } from "@/lib/catalog";
 import { bounds, type Pt } from "@/lib/clicker-layout";
 import {
   clickerPlan,
@@ -10,6 +10,7 @@ import {
   ensureSampleModel,
   importedModel,
   importModel,
+  isTiltedCut,
   MAX_SIZE,
   MODEL_FORMATS,
   SAMPLE_MODEL,
@@ -32,6 +33,61 @@ const CUT_PRESETS = [
   { label: "Left | right", tilt: 90, turn: 0 },
   { label: "Front | back", tilt: 90, turn: 90 },
 ];
+
+// Which way each part's red cut face points on the print bed.
+const HOUSING_FACES: { value: HousingFace; label: string; title: string }[] = [
+  { value: "bottom", label: "↑ Up", title: "Red cut face up to the sky, bottom on the plate" },
+  { value: "cut", label: "↓ Down", title: "Red cut face down on the plate" },
+];
+const CAP_FACES: { value: CapFace; label: string; title: string }[] = [
+  { value: "top", label: "↑ Up", title: "Red cut face up to the sky, top on the plate" },
+  { value: "cut", label: "↓ Down", title: "Red cut face down on the plate" },
+];
+
+function faceHint(housing: HousingFace, cap: CapFace, tilted: boolean) {
+  const housingNote =
+    housing === "cut"
+      ? "Housing face down: a flat base, but the switch pocket and keyring tab need supports."
+      : "Housing face up: the pocket opens to the sky with no supports inside, but a rounded bottom needs supports.";
+  const capNote =
+    cap === "cut"
+      ? "Cap face down: stands on its plug, and the top prints clean with no supports."
+      : "Cap face up: lies on its top, so a rounded top needs supports and shows marks.";
+  return `${housingNote} ${capNote}${tilted ? " With a tilted cut, the preview keeps the housing in the model's pose; the download uses this choice." : ""}`;
+}
+
+function FaceChoice<Value extends string>({
+  label,
+  value,
+  options,
+  onChange,
+}: {
+  label: string;
+  value: Value;
+  options: { value: Value; label: string; title: string }[];
+  onChange: (value: Value) => void;
+}) {
+  return (
+    <div className="mt-3 flex items-center justify-between gap-2">
+      <span>{label}</span>
+      <div className="flex gap-1">
+        {options.map((option) => (
+          <button
+            key={option.value}
+            type="button"
+            title={option.title}
+            aria-label={`${label}: ${option.title}`}
+            aria-pressed={value === option.value}
+            onClick={() => onChange(option.value)}
+            className="h-8 rounded-lg border border-[#e6e7ec] bg-white px-2 text-xs text-zinc-700 hover:bg-zinc-50 aria-pressed:border-blue-600 aria-pressed:text-blue-700"
+          >
+            {option.label}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
 
 export function ModelField({ slug, label, settings, patch, onError }: Props) {
   const [importing, setImporting] = useState(false);
@@ -170,6 +226,21 @@ export function ModelField({ slug, label, settings, patch, onError }: Props) {
           Auto
         </button>
       </div>
+      <FaceChoice
+        label="Housing's red cut face"
+        value={settings.housingFace ?? "cut"}
+        options={HOUSING_FACES}
+        onChange={(housingFace) => patch({ housingFace })}
+      />
+      <FaceChoice
+        label="Cap's red cut face"
+        value={settings.capFace ?? "cut"}
+        options={CAP_FACES}
+        onChange={(capFace) => patch({ capFace })}
+      />
+      <span className="mt-1 block text-xs text-zinc-400">
+        {faceHint(settings.housingFace ?? "cut", settings.capFace ?? "cut", isTiltedCut(tilt))}
+      </span>
       {planned.error ? <span className="mt-2 block text-xs text-red-500">{planned.error}</span> : null}
 
       {plan && planned.least ? (

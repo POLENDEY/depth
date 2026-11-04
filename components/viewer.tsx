@@ -30,11 +30,27 @@ type ViewerApi = {
   capText: THREE.Mesh;
   capBase: THREE.Mesh;
   capGroup: THREE.Group;
+  housingGroup: THREE.Group;
   fitGroup: THREE.Group;
   fit: { assembly: ModelAssembly | null; start: number };
   cutEditor: CutEditor;
   editing: { on: boolean; dragging: boolean };
 };
+
+// A housing laid on its cut face turns upright while the cap lifts off.
+function housingPose(time: number, assembly: ModelAssembly, housing: THREE.Object3D) {
+  const flip = assembly.housingFlip;
+  if (!flip) return;
+  const t = Math.min(1, Math.max(0, time / 0.8));
+  const k = t * t * (3 - 2 * t);
+  housing.quaternion.slerpQuaternions(new THREE.Quaternion(...flip.turn), NO_TURN, k);
+  const pivot = new THREE.Vector3(flip.pivot.x, flip.pivot.y, flip.pivot.z);
+  housing.position
+    .copy(pivot)
+    .addScaledVector(new THREE.Vector3(flip.offset.x, flip.offset.y, flip.offset.z), 1 - k)
+    .add(new THREE.Vector3(0, 0, flip.lift * Math.sin(Math.PI * k)))
+    .sub(pivot.clone().applyQuaternion(housing.quaternion));
+}
 
 // The cap's path in the fit animation (seconds in): up off the bed, over the housing, down
 // onto the switch, then clicking over and over.
@@ -45,7 +61,7 @@ function capPose(time: number, assembly: ModelAssembly, cap: THREE.Object3D) {
   const { offset, press } = assembly;
   const axis = assembly.axis ?? { x: 0, y: 0, z: 1 };
   const above = { x: offset.x + axis.x * 14, y: offset.y + axis.y * 14, z: offset.z + axis.z * 14 };
-  const lift = Math.max(above.z, 14);
+  const lift = Math.max(above.z, 14, assembly.lift ?? 0);
   const ease = (value: number) => {
     const t = Math.min(1, Math.max(0, value));
     return t * t * (3 - 2 * t);
@@ -335,7 +351,9 @@ export function Viewer({
     const capGroup = new THREE.Group();
     capGroup.add(capText, capBase);
     const fitGroup = new THREE.Group();
-    fitGroup.add(housingText, housingBase, capGroup);
+    const housingGroup = new THREE.Group();
+    housingGroup.add(housingText, housingBase);
+    fitGroup.add(housingGroup, capGroup);
     fitGroup.visible = false;
     modelRoot.add(fitGroup);
     const fit = { assembly: null as ModelAssembly | null, start: 0 };
@@ -412,7 +430,11 @@ export function Viewer({
     resize();
 
     const loop = () => {
-      if (fit.assembly) capPose(performance.now() / 1000 - fit.start, fit.assembly, capGroup);
+      if (fit.assembly) {
+        const time = performance.now() / 1000 - fit.start;
+        housingPose(time, fit.assembly, housingGroup);
+        capPose(time, fit.assembly, capGroup);
+      }
       controls.update();
       if (editing.on) {
         if (hoverEvent && !gizmoDrag.active) hover(hoverEvent);
@@ -440,6 +462,7 @@ export function Viewer({
       capText,
       capBase,
       capGroup,
+      housingGroup,
       fitGroup,
       fit,
       cutEditor,
@@ -862,6 +885,8 @@ export function Viewer({
     if (!animating) {
       api.capGroup.position.set(0, 0, 0);
       api.capGroup.quaternion.identity();
+      api.housingGroup.position.set(0, 0, 0);
+      api.housingGroup.quaternion.identity();
     }
     api.fitGroup.visible = animating;
     api.textMesh.visible = !animating && !editing && model !== null;

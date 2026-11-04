@@ -10,6 +10,8 @@ export type LoopStyle = "tab" | "ring" | "heart" | "star" | "corner" | "object" 
 export type LoopSide = "left" | "right";
 export type ModelHoleShape = "straight" | "torus";
 export type Pt3 = { x: number; y: number; z: number };
+export type HousingFace = "cut" | "bottom";
+export type CapFace = "cut" | "top";
 
 export type SurfacePattern = "plain" | "ribs" | "stripes" | "waves" | "diamond" | "dots";
 export type SurfaceOn = "both" | "housing" | "caps";
@@ -145,6 +147,9 @@ export type ProductSettings = {
   // A point (model units) on each piece over the cut that goes with the cap; the others
   // stay on the housing. null takes the biggest piece.
   modelCutParts: Pt3[] | null;
+  // Which side of each clicker part lies on the print bed.
+  housingFace: HousingFace;
+  capFace: CapFace;
   charms: CharmPlacement[];
   charmBase: number;
   tagSize: number;
@@ -225,6 +230,8 @@ const shared = {
   modelCutTilt: 0,
   modelCutTurn: 0,
   modelCutParts: null as Pt3[] | null,
+  housingFace: "cut" as HousingFace,
+  capFace: "cut" as CapFace,
   charms: [] as CharmPlacement[],
   charmBase: 1.2,
   tagSize: 48,

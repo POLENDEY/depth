@@ -95,6 +95,16 @@ export type ModelAssembly = {
   axis?: { x: number; y: number; z: number };
   pivot?: { x: number; y: number; z: number };
   turn?: [number, number, number, number];
+  // How high (mm) the cap must lift to turn over without touching the bed.
+  lift?: number;
+  // A housing laid cut-face down turns upright first: it starts at pivot + offset turned by
+  // `turn` about the pivot, and lifts by `lift` mid-turn to clear the bed.
+  housingFlip?: {
+    turn: [number, number, number, number];
+    pivot: { x: number; y: number; z: number };
+    offset: { x: number; y: number; z: number };
+    lift: number;
+  };
   press: number;
 };
 
