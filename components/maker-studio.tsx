@@ -233,6 +233,7 @@ export function MakerStudio({ slug }: { slug: string }) {
             textColor={settings.textColor}
             baseColor={settings.baseColor}
             showDimensions={showDimensions}
+            exportName={active.title}
             onToggleDimensions={() => setShowDimensions((current) => !current)}
             charms={settings.charms}
             onCharmMove={

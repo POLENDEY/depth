@@ -35,7 +35,46 @@ type ViewerApi = {
   fit: { assembly: ModelAssembly | null; start: number };
   cutEditor: CutEditor;
   editing: { on: boolean; dragging: boolean };
+  snapshot: () => Promise<Blob>;
 };
+
+// The exported picture's longest side, and the empty margin around the model in it.
+const SNAPSHOT_SIZE = 4096;
+const SNAPSHOT_MARGIN = 0.06;
+
+// Trims fully transparent pixels and centers what's left on a canvas with an even margin.
+function centeredOnTransparent(source: HTMLCanvasElement) {
+  const { width, height } = source;
+  const read = document.createElement("canvas");
+  read.width = width;
+  read.height = height;
+  const context = read.getContext("2d", { willReadFrequently: true })!;
+  context.drawImage(source, 0, 0);
+  const alpha = context.getImageData(0, 0, width, height).data;
+  let minX = width;
+  let minY = height;
+  let maxX = -1;
+  let maxY = -1;
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      if (alpha[(y * width + x) * 4 + 3] > 2) {
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+      }
+    }
+  }
+  if (maxX < 0) throw new Error("Nothing to export in this view.");
+  const cropWidth = maxX - minX + 1;
+  const cropHeight = maxY - minY + 1;
+  const margin = Math.round(Math.max(cropWidth, cropHeight) * SNAPSHOT_MARGIN);
+  const out = document.createElement("canvas");
+  out.width = cropWidth + margin * 2;
+  out.height = cropHeight + margin * 2;
+  out.getContext("2d")!.drawImage(read, minX, minY, cropWidth, cropHeight, margin, margin, cropWidth, cropHeight);
+  return out;
+}
 
 // A housing laid on its cut face turns upright while the cap lifts off.
 function housingPose(time: number, assembly: ModelAssembly, housing: THREE.Object3D) {
@@ -117,6 +156,8 @@ type ViewerProps = {
   // The keyring loop dragged around the housing: which way it points (degrees).
   onLoopMove?: (angle: number) => void;
   showDimensions?: boolean;
+  // File name (without extension) for the exported PNG.
+  exportName?: string;
   onToggleDimensions?: () => void;
 };
 
@@ -185,11 +226,34 @@ export function Viewer({
   onLoopMove,
   showDimensions = false,
   onToggleDimensions,
+  exportName = "model",
 }: ViewerProps) {
   const hostRef = useRef<HTMLDivElement>(null);
   const apiRef = useRef<ViewerApi | null>(null);
   const lineMatsRef = useRef<THREE.MeshStandardMaterial[]>([]);
   const [playing, setPlaying] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [exportError, setExportError] = useState<string | null>(null);
+
+  async function exportImage() {
+    const api = apiRef.current;
+    if (!api || exporting) return;
+    setExporting(true);
+    setExportError(null);
+    try {
+      const blob = await api.snapshot();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `${exportName.trim().replace(/[^\w-]+/g, "-").replace(/^-+|-+$/g, "").toLowerCase() || "model"}.png`;
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (reason) {
+      setExportError(reason instanceof Error ? reason.message : "Could not export the image.");
+    } finally {
+      setExporting(false);
+    }
+  }
   const [editingCut, setEditingCut] = useState(false);
   const [cutReadout, setCutReadout] = useState<string | null>(null);
   const [fillAngle, setFillAngle] = useState(30);
@@ -449,6 +513,63 @@ export function Viewer({
     document.addEventListener("visibilitychange", onVisibility);
     renderer.setAnimationLoop(loop);
 
+    // The model as the camera sees it, on a transparent background: only the part of the view
+    // holding the model is rendered, so it fills the picture at full size.
+    const snapshot = async () => {
+      const shown = editing.on && cutEditor.hasSource ? [cutEditor.sourceMesh] : fitGroup.visible ? [fitGroup] : [textMesh, baseMesh];
+      const box = new THREE.Box3();
+      for (const object of shown) box.union(new THREE.Box3().setFromObject(object));
+      if (box.isEmpty()) throw new Error("Nothing to export in this view.");
+      const corners = [0, 1, 2, 3, 4, 5, 6, 7].map((index) =>
+        new THREE.Vector3(index & 1 ? box.max.x : box.min.x, index & 2 ? box.max.y : box.min.y, index & 4 ? box.max.z : box.min.z).project(camera),
+      );
+      const width = viewport.width;
+      const height = viewport.height;
+      let left = Infinity;
+      let right = -Infinity;
+      let top = Infinity;
+      let bottom = -Infinity;
+      for (const corner of corners) {
+        left = Math.min(left, ((corner.x + 1) / 2) * width);
+        right = Math.max(right, ((corner.x + 1) / 2) * width);
+        top = Math.min(top, ((1 - corner.y) / 2) * height);
+        bottom = Math.max(bottom, ((1 - corner.y) / 2) * height);
+      }
+      const pad = Math.max(right - left, bottom - top) * 0.04;
+      left -= pad;
+      top -= pad;
+      const regionWidth = right - left + pad;
+      const regionHeight = bottom - top + pad;
+      const scale = SNAPSHOT_SIZE / Math.max(regionWidth, regionHeight);
+
+      const shot = new THREE.WebGLRenderer({ antialias: true, alpha: true, preserveDrawingBuffer: true });
+      shot.setPixelRatio(1);
+      shot.setSize(Math.round(regionWidth * scale), Math.round(regionHeight * scale), false);
+      shot.setClearColor(0x000000, 0);
+      shot.outputColorSpace = renderer.outputColorSpace;
+      shot.toneMapping = renderer.toneMapping;
+      shot.toneMappingExposure = renderer.toneMappingExposure;
+      shot.shadowMap.enabled = true;
+      shot.shadowMap.type = renderer.shadowMap.type;
+      shot.localClippingEnabled = true;
+      const lens = camera.clone();
+      lens.setViewOffset(width * scale, height * scale, left * scale, top * scale, regionWidth * scale, regionHeight * scale);
+      lens.updateProjectionMatrix();
+      const hidden = [grid, floor, dimensionGroup].filter((object) => object.visible);
+      for (const object of hidden) object.visible = false;
+      try {
+        shot.render(scene, lens);
+      } finally {
+        for (const object of hidden) object.visible = true;
+      }
+      const picture = centeredOnTransparent(shot.domElement);
+      shot.dispose();
+      shot.forceContextLoss();
+      return new Promise<Blob>((resolve, reject) =>
+        picture.toBlob((blob) => (blob ? resolve(blob) : reject(new Error("Could not make the image."))), "image/png"),
+      );
+    };
+
     apiRef.current = {
       textMesh,
       baseMesh,
@@ -467,6 +588,7 @@ export function Viewer({
       fit,
       cutEditor,
       editing,
+      snapshot,
     };
 
     const raycaster = new THREE.Raycaster();
@@ -978,7 +1100,26 @@ export function Viewer({
         <button type="button" onClick={() => apiRef.current?.frame(true)} className={`${TOOL} bg-white/90 text-zinc-600 hover:bg-white`}>
           Reset view
         </button>
+        <button
+          type="button"
+          onClick={() => void exportImage()}
+          disabled={!model || exporting}
+          title="Save the model as a PNG with a transparent background, from the current camera angle"
+          className={`${TOOL} bg-white/90 text-zinc-600 hover:bg-white disabled:opacity-50`}
+        >
+          <svg viewBox="0 0 16 16" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true">
+            <rect x="2" y="3" width="12" height="10" rx="1.5" />
+            <circle cx="6" cy="7" r="1.2" />
+            <path d="m3 12 3.5-3 2.5 2 2-1.5 2 2.5" strokeLinejoin="round" />
+          </svg>
+          {exporting ? "Saving…" : "PNG"}
+        </button>
       </div>
+      {exportError ? (
+        <p role="alert" className="absolute top-14 right-3 z-10 rounded-lg bg-red-50 px-3 py-1.5 text-xs text-red-700 shadow-sm">
+          {exportError}
+        </p>
+      ) : null}
       {editing ? (
         <div className="absolute top-14 right-3 z-10 max-w-[17rem] rounded-xl bg-white/90 px-3 py-2 text-xs text-zinc-600 shadow-sm backdrop-blur">
           {cutReadout ? (

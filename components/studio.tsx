@@ -289,6 +289,7 @@ export function Studio() {
                 : undefined
             }
             showDimensions={showDimensions}
+            exportName="Name keychain"
             onToggleDimensions={() => setShowDimensions((visible) => !visible)}
           />
           <div className="pointer-events-none absolute inset-x-0 bottom-0 flex flex-col gap-2 p-3 sm:flex-row sm:items-end sm:justify-between">
