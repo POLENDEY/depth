@@ -247,6 +247,54 @@ export function calculateCost(inputs: CostInputs, included: Included = ALL_INCLU
   };
 }
 
+// Volume (mm³), surface area (mm²) and size (mm) of a closed triangle mesh in millimeters,
+// as flat xyz triples.
+export function measureMesh(positions: ArrayLike<number>) {
+  let signed = 0;
+  let area = 0;
+  const min = [Infinity, Infinity, Infinity];
+  const max = [-Infinity, -Infinity, -Infinity];
+  for (let index = 0; index + 8 < positions.length; index += 9) {
+    const ax = positions[index];
+    const ay = positions[index + 1];
+    const az = positions[index + 2];
+    const bx = positions[index + 3];
+    const by = positions[index + 4];
+    const bz = positions[index + 5];
+    const cx = positions[index + 6];
+    const cy = positions[index + 7];
+    const cz = positions[index + 8];
+    signed += ax * (by * cz - bz * cy) + ay * (bz * cx - bx * cz) + az * (bx * cy - by * cx);
+    const ux = bx - ax;
+    const uy = by - ay;
+    const uz = bz - az;
+    const vx = cx - ax;
+    const vy = cy - ay;
+    const vz = cz - az;
+    area += Math.hypot(uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx) / 2;
+    for (let corner = 0; corner < 9; corner += 3) {
+      for (let axis = 0; axis < 3; axis += 1) {
+        const value = positions[index + corner + axis];
+        if (value < min[axis]) min[axis] = value;
+        if (value > max[axis]) max[axis] = value;
+      }
+    }
+  }
+  const size = min[0] <= max[0] ? [max[0] - min[0], max[1] - min[1], max[2] - min[2]] : [0, 0, 0];
+  return { volume: Math.abs(signed / 6), area, size: size as [number, number, number] };
+}
+
+export const PLA_DENSITY = 1.24;
+// Walls and top/bottom skins printed solid, about two 0.42 mm lines thick.
+export const SHELL_THICKNESS = 0.84;
+
+// Filament (g) for a part like a slicer would print it: a solid shell over the surface and
+// sparse infill inside. Thin parts come out solid.
+export function estimateGrams(volume: number, area: number, infillPercent: number, density = PLA_DENSITY) {
+  const shell = Math.min(volume, area * SHELL_THICKNESS);
+  return ((shell + (volume - shell) * (infillPercent / 100)) / 1000) * density;
+}
+
 const PESO = new Intl.NumberFormat("en-PH", { style: "currency", currency: "PHP" });
 
 export function formatPeso(value: number) {

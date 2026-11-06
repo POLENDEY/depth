@@ -50,6 +50,12 @@ export function importedModel(id: string) {
 }
 
 export async function importModel(file: File) {
+  const { name, positions, repair } = await readModelFile(file);
+  return registerModel(name, positions, repair);
+}
+
+// The file's triangles in its own units, Z up, repaired into a closed solid when it can be.
+export async function readModelFile(file: File) {
   if (file.size > MAX_BYTES) throw new Error("That file is over 150 MB. Try a smaller or simplified model.");
   const extension = file.name.toLowerCase().split(".").pop() ?? "";
   let object: THREE.Object3D;
@@ -97,7 +103,7 @@ export async function importModel(file: File) {
     at += chunk.length;
   }
   const repaired = await repairMesh(positions);
-  return registerModel(file.name.replace(/\.[^.]+$/, ""), repaired.positions, repaired.repair);
+  return { name: file.name.replace(/\.[^.]+$/, ""), extension, positions: repaired.positions, repair: repaired.repair };
 }
 
 export function registerModel(name: string, raw: Float32Array, repair: MeshRepair | null = null) {

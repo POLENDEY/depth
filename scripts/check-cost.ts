@@ -5,7 +5,10 @@ import {
   calculateCost,
   costProblems,
   DEFAULT_COST_INPUTS,
+  estimateGrams,
   formatPeso,
+  measureMesh,
+  SHELL_THICKNESS,
   wearPerHour,
   type CostInputs,
 } from "../lib/print-cost";
@@ -132,6 +135,30 @@ check("invalid inputs are reported instead of priced", () => {
 check("valid inputs never produce NaN or Infinity", () => {
   const quote = calculateCost({ ...base, pricing: "margin", profitPercent: 99.9, paymentFeePercent: 99.9, taxPercent: 100, discountPercent: 100 });
   for (const [key, value] of Object.entries(quote)) assert.ok(Number.isFinite(value), `${key} is ${value}`);
+});
+
+check("mesh measuring and filament estimate", () => {
+  // A 10 mm cube as 12 triangles.
+  const corner = (x: number, y: number, z: number) => [x * 10, y * 10, z * 10];
+  const quad = (a: number[], b: number[], c: number[], d: number[]) => [...a, ...b, ...c, ...a, ...c, ...d];
+  const p = (bits: string) => corner(+bits[0], +bits[1], +bits[2]);
+  const cube = [
+    ...quad(p("000"), p("010"), p("110"), p("100")),
+    ...quad(p("001"), p("101"), p("111"), p("011")),
+    ...quad(p("000"), p("100"), p("101"), p("001")),
+    ...quad(p("010"), p("011"), p("111"), p("110")),
+    ...quad(p("000"), p("001"), p("011"), p("010")),
+    ...quad(p("100"), p("110"), p("111"), p("101")),
+  ];
+  const { volume, area, size } = measureMesh(cube);
+  near(volume, 1000, "volume");
+  near(area, 600, "area");
+  assert.deepEqual(size, [10, 10, 10]);
+  near(estimateGrams(volume, area, 100), 1.24, "solid grams");
+  const shell = 600 * SHELL_THICKNESS;
+  near(estimateGrams(volume, area, 15), ((shell + (1000 - shell) * 0.15) / 1000) * 1.24, "15% infill grams");
+  // A thin plate is all shell, so infill doesn't matter.
+  near(estimateGrams(10, 1000, 0), 10 * 1.24 / 1000, "thin part");
 });
 
 check("peso formatting", () => {
