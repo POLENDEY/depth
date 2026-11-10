@@ -26,7 +26,9 @@ export async function exportKeychain(
   const textColors = textSlotColors(model.text, textColor, lineColors);
   const group = new THREE.Group();
   group.add(meshFrom(model.base, "Base", baseColor));
-  group.add(hasLineColors(model.text) ? multiMesh(model.text, "Text", textColors) : meshFrom(model.text, "Text", textColor));
+  if (hasText(model)) {
+    group.add(hasLineColors(model.text) ? multiMesh(model.text, "Text", textColors) : meshFrom(model.text, "Text", textColor));
+  }
 
   try {
     if (format === "stl") {
@@ -85,6 +87,10 @@ export function downloadBlob(blob: Blob, filename: string) {
   link.download = filename;
   link.click();
   URL.revokeObjectURL(url);
+}
+
+function hasText(model: KeychainModel) {
+  return (model.text.getAttribute("position")?.count ?? 0) > 0;
 }
 
 function disposeMaterials(group: THREE.Group) {
@@ -151,11 +157,11 @@ function build3mf(model: KeychainModel, textColors: string[], baseColor: string,
     <m:colorgroup id="2">
       <m:color color="${baseHex}"/>
     </m:colorgroup>
-    ${objectXml(3, "Text", model.text, 1, triangleColor)}
+    ${hasText(model) ? objectXml(3, "Text", model.text, 1, triangleColor) : ""}
     ${objectXml(4, "Base", model.base, 2, () => ({ index: 0, paint: "8" }))}
   </resources>
   <build>
-    <item objectid="3" transform="1 0 0 0 1 0 0 0 1 0 0 0"/>
+    ${hasText(model) ? `<item objectid="3" transform="1 0 0 0 1 0 0 0 1 0 0 0"/>` : ""}
     <item objectid="4" transform="1 0 0 0 1 0 0 0 1 0 0 0"/>
   </build>
 </model>`;

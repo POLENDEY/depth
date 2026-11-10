@@ -700,6 +700,32 @@ export function bottomOutline(plan: ClickerPlan) {
   return sliceRings(plan, 2.5).reduce((a, b) => (Math.abs(ringArea(b)) > Math.abs(ringArea(a)) ? b : a), [] as Pt[]);
 }
 export const SAMPLE_MODEL = "model-sample";
+export const CASE_SAMPLE = "case-sample";
+
+// A rounded block like a roller-bottle case, shown until a model is uploaded.
+export function ensureCaseSample() {
+  if (models.has(CASE_SAMPLE)) return;
+  const width = 30;
+  const depth = 22;
+  const radius = 5;
+  const shape = new THREE.Shape();
+  shape.moveTo(-width / 2 + radius, -depth / 2);
+  shape.lineTo(width / 2 - radius, -depth / 2);
+  shape.absarc(width / 2 - radius, -depth / 2 + radius, radius, -Math.PI / 2, 0, false);
+  shape.lineTo(width / 2, depth / 2 - radius);
+  shape.absarc(width / 2 - radius, depth / 2 - radius, radius, 0, Math.PI / 2, false);
+  shape.lineTo(-width / 2 + radius, depth / 2);
+  shape.absarc(-width / 2 + radius, depth / 2 - radius, radius, Math.PI / 2, Math.PI, false);
+  shape.lineTo(-width / 2, -depth / 2 + radius);
+  shape.absarc(-width / 2 + radius, -depth / 2 + radius, radius, Math.PI, Math.PI * 1.5, false);
+  const geometry = new THREE.ExtrudeGeometry(shape, { depth: 84, bevelEnabled: false, curveSegments: 8 });
+  const flat = geometry.toNonIndexed();
+  const id = registerModel("Rounded block", Float32Array.from(flat.getAttribute("position").array));
+  models.set(CASE_SAMPLE, models.get(id)!);
+  models.delete(id);
+  geometry.dispose();
+  flat.dispose();
+}
 
 // A chunky puffy star, shown until a model is uploaded.
 export function ensureSampleModel() {

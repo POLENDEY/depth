@@ -150,6 +150,24 @@ export type ProductSettings = {
   // Which side of each clicker part lies on the print bed.
   housingFace: HousingFace;
   capFace: CapFace;
+  // A model cut into a hollow case (mm): the housing's height from the bottom to the cut and
+  // the cap's from the cut to the top (together the closed height), a round bore in each part
+  // (the housing's from the top of its lip, the cap's from the cut), and the lip on the
+  // housing that slides into the cap: its height (0 leaves both faces flat and flush), the
+  // wall left outside it, and the fit gap.
+  caseHousingHeight: number;
+  caseCapHeight: number;
+  housingBore: number;
+  housingDepth: number;
+  capBore: number;
+  capDepth: number;
+  lipHeight: number;
+  lipWall: number;
+  fitGap: number;
+  // How far the side text moves up from its spot (mm), and whether the preview shows the
+  // case closed instead of laid out for printing.
+  caseTextShift: number;
+  caseAssembled: boolean;
   charms: CharmPlacement[];
   charmBase: number;
   tagSize: number;
@@ -162,7 +180,7 @@ export type NumberKey = {
 }[keyof ProductSettings];
 
 export type Field =
-  | { type: "text"; label: string; maxChars?: number }
+  | { type: "text"; label: string; maxChars?: number; optional?: boolean }
   | { type: "font" }
   | { type: "number"; key: NumberKey; label: string; min: number; max: number; step: number }
   | { type: "select"; label: string; options: { value: Pattern; label: string }[] }
@@ -176,6 +194,7 @@ export type Field =
   | { type: "surface"; label: string }
   | { type: "housing"; label: string }
   | { type: "model"; label: string }
+  | { type: "case-model"; label: string }
   | { type: "charm" }
   | { type: "colors"; text: string; base: string };
 
@@ -232,6 +251,17 @@ const shared = {
   modelCutParts: null as Pt3[] | null,
   housingFace: "cut" as HousingFace,
   capFace: "cut" as CapFace,
+  caseHousingHeight: 62,
+  caseCapHeight: 22,
+  housingBore: 16.5,
+  housingDepth: 64,
+  capBore: 12,
+  capDepth: 18,
+  lipHeight: 5,
+  lipWall: 1.2,
+  fitGap: 0.2,
+  caseTextShift: 0,
+  caseAssembled: false,
   charms: [] as CharmPlacement[],
   charmBase: 1.2,
   tagSize: 48,
@@ -459,6 +489,41 @@ export const PRODUCTS: Product[] = [
       { type: "loop-style", label: "Keyring hole" },
       { type: "number", key: "holeDiameter", label: "Ring hole", min: 3, max: 6, step: 0.5 },
       { type: "colors", text: "Object", base: "Borders" },
+    ],
+  },
+  {
+    slug: "bottle-case",
+    title: "Bottle Case",
+    summary:
+      "Upload a 3D model and it's cut at your height into a hollow housing and cap that slide together, with room inside for a bottle and raised text on the front.",
+    button: "#ff5a36",
+    settings: {
+      ...shared,
+      text: "kimcut",
+      fontId: "pacifico",
+      textColor: "#f9a8d4",
+      baseColor: "#ec4899",
+      letterHeight: 12,
+      textThickness: 1.2,
+      baseThickness: 2,
+    },
+    fields: [
+      { type: "case-model", label: "3D model" },
+      { type: "number", key: "caseHousingHeight", label: "Housing height", min: 5, max: 240, step: 0.5 },
+      { type: "number", key: "caseCapHeight", label: "Cap height", min: 5, max: 240, step: 0.5 },
+      { type: "number", key: "housingBore", label: "Housing inside diameter", min: 4, max: 120, step: 0.1 },
+      { type: "number", key: "housingDepth", label: "Housing inside depth", min: 2, max: 245, step: 0.5 },
+      { type: "number", key: "capBore", label: "Cap inside diameter", min: 4, max: 120, step: 0.1 },
+      { type: "number", key: "capDepth", label: "Cap inside depth", min: 2, max: 245, step: 0.5 },
+      { type: "number", key: "lipHeight", label: "Lip height", min: 0, max: 15, step: 0.5 },
+      { type: "number", key: "lipWall", label: "Wall outside the lip", min: 0.8, max: 5, step: 0.1 },
+      { type: "number", key: "fitGap", label: "Lip fit gap", min: 0.05, max: 0.8, step: 0.05 },
+      { type: "text", label: "Text", maxChars: 18, optional: true },
+      { type: "font" },
+      { type: "number", key: "letterHeight", label: "Letter height", min: 4, max: 40, step: 0.5 },
+      { type: "number", key: "textThickness", label: "Text thickness", min: 0.4, max: 3, step: 0.1 },
+      { type: "number", key: "caseTextShift", label: "Text position", min: -120, max: 120, step: 0.5 },
+      { type: "colors", text: "Text", base: "Case" },
     ],
   },
   {

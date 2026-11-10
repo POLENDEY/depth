@@ -18,10 +18,12 @@ import { drilled, manifoldKernel, modelSolid, solidPositions, type Solid } from 
 import {
   autoHole,
   bottomOutline,
+  CASE_SAMPLE,
   clickerPlan,
   CUT,
   cutFrameModel,
   cutNormal,
+  ensureCaseSample,
   ensureSampleModel,
   importedModel,
   isTiltedCut,
@@ -72,6 +74,8 @@ export function buildProduct(
       return clickerKeychain(requiredFont(font), settings, quality);
     case "model-clicker":
       return modelClicker(settings, quality);
+    case "bottle-case":
+      return bottleCase(font, settings, quality);
     case "pen-holder":
       return penHolder(requiredFont(font), settings, quality, curve);
     case "picture-frame":
@@ -2697,6 +2701,193 @@ function boundsOf(glyphs: GlyphLayout[]) {
 
 function turnUpright(geometry: THREE.BufferGeometry) {
   geometry.rotateX(Math.PI / 2);
+}
+
+// Thinnest floor, ceiling and side wall left around a case's bores (mm).
+const CASE_WALL = 0.8;
+
+// An uploaded model cut flat at a height into a hollow case: the housing below has a round
+// bore and a lip on top that slides into the cap; the cap above has its own bore and a
+// pocket for the lip. Raised text sits on the front (-y), reading up the side.
+function bottleCase(font: Font | null, settings: ProductSettings, quality: MeshQuality): KeychainModel {
+  ensureCaseSample();
+  const id = settings.modelId || CASE_SAMPLE;
+  const model = importedModel(id);
+  if (!model) throw new Error("That 3D model is no longer loaded. Upload it again.");
+  const { CrossSection, Manifold } = manifoldKernel();
+  const preview = quality === "preview";
+  const fine = preview ? 48 : 96;
+  const cut = clamp(settings.caseHousingHeight, 5, 240);
+  const height = cut + clamp(settings.caseCapHeight, 5, 240);
+  const scale = height / model.height;
+  const lip = clamp(settings.lipHeight, 0, 15);
+  const flush = lip === 0;
+  const lipWall = clamp(settings.lipWall, 0.8, 5);
+  const gap = clamp(settings.fitGap, 0.05, 0.8);
+  const housingRadius = clamp(settings.housingBore, 4, 120) / 2;
+  const capRadius = clamp(settings.capBore, 4, 120) / 2;
+  const lipTop = cut + lip;
+  const housingFloor = lipTop - clamp(settings.housingDepth, 2, 245);
+  const capCeiling = cut + clamp(settings.capDepth, 2, 245);
+  const floor = Math.max(CASE_WALL, housingFloor);
+  const ceiling = Math.min(height - CASE_WALL, capCeiling);
+  const problems: string[] = [];
+  if (model.repair?.kind === "welded") {
+    problems.push("Your model had small gaps, doubled walls, or loose bits, so it was repaired automatically.");
+  } else if (model.repair?.kind === "rebuilt") {
+    problems.push(
+      `Your model had holes in its surface, so it was rebuilt as a solid with about ${(model.repair.detail * scale).toFixed(1)} mm detail.`,
+    );
+  }
+  if (floor > housingFloor) {
+    problems.push(`The housing is only ${(lipTop - floor).toFixed(1)} mm deep inside, so a ${CASE_WALL} mm floor stays under the bore.`);
+  }
+  if (ceiling < capCeiling) {
+    problems.push(`The cap is only ${(ceiling - cut).toFixed(1)} mm deep inside, so a ${CASE_WALL} mm top stays over the bore.`);
+  }
+
+  const temps: { delete(): void }[] = [];
+  const keep = <T extends { delete(): void }>(item: T) => {
+    temps.push(item);
+    return item;
+  };
+  try {
+    const body = keep(modelSolid(id, model.positions, preview).scale(scale));
+    const box = body.boundingBox();
+    const section = keep(body.slice(cut));
+    if (section.isEmpty()) throw new Error("There's nothing to cut at that height. Move the cut.");
+    const rect = section.bounds();
+    const cx = (rect.min[0] + rect.max[0]) / 2;
+    const cy = (rect.min[1] + rect.max[1]) / 2;
+    const circle = (radius: number) => keep(CrossSection.circle(radius, fine).translate([cx, cy]));
+    const bore = (radius: number, from: number, to: number) =>
+      keep(Manifold.cylinder(to - from, radius, radius, fine).translate(cx, cy, from));
+    // Whether a circle stays at least the thinnest wall inside the model at every sampled height.
+    const breaksOut = (radius: number, from: number, to: number) => {
+      for (let step = 0; step <= 4; step += 1) {
+        const z = from + ((to - from) * step) / 4;
+        const room = keep(keep(body.slice(Math.min(box.max[2] - 0.05, Math.max(box.min[2] + 0.05, z)))).offset(-CASE_WALL, "Round", 2, fine));
+        if (keep(circle(radius).subtract(room)).area() > 0.01) return true;
+      }
+      return false;
+    };
+
+    const lipOuter = keep(section.offset(-lipWall, "Round", 2, fine));
+    const lipRing = keep(lipOuter.subtract(circle(housingRadius)));
+    if (!flush) {
+      if (lipOuter.isEmpty() || lipRing.isEmpty()) {
+        throw new Error("The model is too thin at the cut for a lip. Make the inside diameter or the wall outside the lip smaller.");
+      }
+      if (keep(circle(housingRadius + CASE_WALL).subtract(lipOuter)).area() > 0.01) {
+        problems.push("The lip is thinner than 0.8 mm next to the housing bore. Make the housing's inside diameter or the wall outside the lip smaller.");
+      }
+      if (lipWall - gap < 0.6) {
+        problems.push("The cap's wall around the lip is under 0.6 mm. Make the wall outside the lip thicker or the fit gap smaller.");
+      }
+    }
+    if (breaksOut(housingRadius, floor, cut)) {
+      problems.push("The housing bore breaks through or leaves a wall under 0.8 mm. Make its inside diameter smaller or the model bigger.");
+    }
+    if (breaksOut(capRadius, cut, ceiling)) {
+      problems.push("The cap bore breaks through or leaves a wall under 0.8 mm. Make its inside diameter smaller or the model bigger.");
+    }
+
+    const lower = keep(body.trimByPlane([0, 0, -1], -cut));
+    const housing = keep(
+      Manifold.difference([
+        flush ? lower : keep(Manifold.union([lower, keep(lipRing.extrude(lip).translate(0, 0, cut))])),
+        bore(housingRadius, floor, lipTop + 1),
+      ]),
+    );
+    const capCuts = [bore(capRadius, cut - 1, ceiling)];
+    if (!flush) capCuts.push(keep(keep(lipOuter.offset(gap, "Round", 2, fine)).extrude(lip + gap + 1).translate(0, 0, cut - 1)));
+    const cap = keep(Manifold.difference([keep(body.trimByPlane([0, 0, 1], cut)), ...capCuts]));
+    if (housing.isEmpty() || cap.isEmpty()) throw new Error("Could not cut that model. Try another cut height.");
+
+    // Raised text on the front, reading up the longer part: the letters' tops face -x.
+    let raised: Solid | null = null;
+    if (font && settings.text.trim()) {
+      const layout = layoutText(font, settings.text, clamp(settings.letterHeight, 4, 40), quality, { maxChars: 18 });
+      problems.push(...layout.warnings);
+      const glyphs = layout.glyphs;
+      const minX = Math.min(...glyphs.map((glyph) => glyph.minX));
+      const maxX = Math.max(...glyphs.map((glyph) => glyph.maxX));
+      const minY = Math.min(...glyphs.map((glyph) => glyph.minY));
+      const maxY = Math.max(...glyphs.map((glyph) => glyph.maxY));
+      const onHousing = cut >= height - cut;
+      const span = (onHousing ? cut : height - cut) - 6;
+      const across = box.max[0] - box.min[0] - 4;
+      const fit = Math.min(1, span / (maxX - minX), across / (maxY - minY));
+      if (fit < 1) problems.push("The text was shrunk to fit the side. Make the letters smaller or the case bigger.");
+      const divisions = preview ? 12 : 24;
+      const outlines = layout.shapes.map((shape) =>
+        keep(
+          new CrossSection(
+            [shape.getPoints(divisions), ...shape.holes.map((hole) => hole.getPoints(divisions))].map((ring) =>
+              ring.map((point) => [point.x, point.y] as [number, number]),
+            ),
+            "EvenOdd",
+          ),
+        ),
+      );
+      const letters = keep(
+        keep(CrossSection.union(outlines)).translate([-(minX + maxX) / 2, -(minY + maxY) / 2]).scale(fit),
+      );
+      const thickness = clamp(settings.textThickness, 0.4, 3);
+      const middle = (onHousing ? cut / 2 : (cut + height) / 2) + settings.caseTextShift;
+      // From the middle of the model out past its front by the text's thickness.
+      const reach = cy - (box.min[1] - thickness - 1);
+      const place = new THREE.Matrix4()
+        .makeBasis(new THREE.Vector3(0, 0, 1), new THREE.Vector3(-1, 0, 0), new THREE.Vector3(0, -1, 0))
+        .setPosition(cx, cy, middle);
+      const prism = keep(keep(letters.extrude(reach)).transform(place.elements as Parameters<Solid["transform"]>[0]));
+      raised = keep(Manifold.difference([keep(prism.intersect(keep(body.translate(0, -thickness, 0)))), body]));
+      if (raised.isEmpty()) {
+        problems.push("The text is off the side of the model. Move it with Text position.");
+        raised = null;
+      } else {
+        const textBox = raised.boundingBox();
+        if (textBox.min[2] < cut && textBox.max[2] > cut) {
+          problems.push("The text crosses the cut, so it's split between the housing and the cap. Move it with Text position.");
+        }
+      }
+    }
+
+    // Closed in the preview when asked; otherwise side by side, the cap turned over onto its top.
+    const housingBox = housing.boundingBox();
+    const capBox = cap.boundingBox();
+    const capPose =
+      preview && settings.caseAssembled
+        ? new THREE.Matrix4()
+        : new THREE.Matrix4()
+            .makeTranslation(housingBox.max[0] + 8 - capBox.min[0], capBox.min[1] + capBox.max[1], height)
+            .multiply(new THREE.Matrix4().makeRotationX(Math.PI));
+    const plain = (part: Solid) => plainGeometry(solidPositions(part));
+    const base = fuse([plain(housing), plain(cap).applyMatrix4(capPose)]);
+    const textParts: THREE.BufferGeometry[] = [];
+    if (raised) {
+      const below = keep(raised.trimByPlane([0, 0, -1], -cut));
+      const above = keep(raised.trimByPlane([0, 0, 1], cut));
+      if (!below.isEmpty()) textParts.push(plain(below));
+      if (!above.isEmpty()) textParts.push(plain(above).applyMatrix4(capPose));
+    }
+    const text = textParts.length ? fuse(textParts) : new THREE.BufferGeometry();
+    if (!textParts.length) text.setAttribute("position", new THREE.BufferAttribute(new Float32Array(0), 3));
+
+    const longest = Math.max(ceiling - floor, 0);
+    const flatTop = keep(body.slice(box.max[2] - 0.3)).area() > section.area() * 0.5;
+    const joint = flush
+      ? "The faces meet flush with no lip, so the cap stays on by gripping the bottle's top: make the cap's inside diameter about 0.2 mm bigger than it."
+      : `The housing's ${lip} mm lip slides into the cap with a ${gap} mm fit gap: make the gap bigger if it's too tight.`;
+    problems.push(
+      `Housing ${cut} mm + cap ${(height - cut).toFixed(1)} mm = ${height.toFixed(1)} mm tall closed. It holds a bottle up to ${(housingRadius * 2).toFixed(1)} mm wide and ${longest.toFixed(1)} mm long, with the top ${(capRadius * 2).toFixed(1)} mm wide in the cap. ${joint} Print the housing standing on its bottom and the cap on its top, so both open upward with no supports inside${
+        flatTop ? "" : " (the cap's rounded top needs supports under it)"
+      }.`,
+    );
+    return pack(text, base, problems);
+  } finally {
+    for (const item of temps) item.delete();
+  }
 }
 
 function fuse(parts: THREE.BufferGeometry[]) {

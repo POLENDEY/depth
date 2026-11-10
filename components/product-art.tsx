@@ -9,6 +9,7 @@ export function ProductArt({ slug }: { slug: string }) {
   if (slug === "flexi-keychain") return <FlexiArt />;
   if (slug === "clicker-keychain") return <ClickerArt />;
   if (slug === "model-clicker") return <ModelClickerArt />;
+  if (slug === "bottle-case") return <BottleCaseArt />;
   if (slug === "pen-holder") return <PenArt />;
   if (slug === "picture-frame") return <FrameArt />;
   if (slug === "nameplate") return <PlateArt />;
@@ -77,6 +78,28 @@ function FlexiArt() {
           </g>
         );
       })}
+    </Scene>
+  );
+}
+
+function BottleCaseArt() {
+  return (
+    <Scene id="bottle-case" from="#fdf2f8" to="#fbcfe8">
+      <rect x="70" y="40" width="64" height="120" rx="14" fill="#ec4899" />
+      <rect x="70" y="160" width="64" height="44" rx="14" fill="#db2777" />
+      <rect x="70" y="156" width="64" height="8" fill="#be185d" />
+      <text
+        transform="translate(110 150) rotate(-90)"
+        fill="#f9a8d4"
+        fontFamily="Pacifico, cursive"
+        fontSize="26"
+      >
+        kimcut
+      </text>
+      <rect x="186" y="96" width="64" height="108" rx="14" fill="#ec4899" />
+      <rect x="196" y="78" width="44" height="22" rx="4" fill="#f472b6" />
+      <circle cx="218" cy="150" r="18" fill="#be185d" />
+      <circle cx="218" cy="150" r="12" fill="#fbcfe8" />
     </Scene>
   );
 }

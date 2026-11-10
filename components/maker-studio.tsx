@@ -7,6 +7,7 @@ import { FontField } from "@/components/font-field";
 import { Viewer } from "@/components/viewer";
 import { CostEstimate } from "@/components/cost-estimate";
 import { HousingField } from "@/components/housing-field";
+import { CaseModelField } from "@/components/case-model-field";
 import { ModelField } from "@/components/model-field";
 import { ensureManifold } from "@/lib/manifold";
 import { partsMode } from "@/lib/clicker-layout";
@@ -56,7 +57,7 @@ export function MakerStudio({ slug }: { slug: string }) {
   const fonts = useFontLibrary();
   const spotifyAttempt = useRef(0);
 
-  const needsText = product?.fields.some((field) => field.type === "text") ?? false;
+  const needsText = product?.fields.some((field) => field.type === "text" && !field.optional) ?? false;
   const needsFont = product?.fields.some((field) => field.type === "font") ?? false;
   const isModel = slug === "model-clicker";
   const geometryKey = useMemo(() => JSON.stringify({ slug, settings }), [slug, settings]);
@@ -84,7 +85,7 @@ export function MakerStudio({ slug }: { slug: string }) {
         try {
           const font = needsFont ? await fonts.load(current.fontId) : null;
           await Promise.all([...current.charms.map((charm) => charm.id), current.housingLogo].map(ensureCharmArt));
-          if (product.slug === "model-clicker") await ensureManifold();
+          if (product.slug === "model-clicker" || product.slug === "bottle-case") await ensureManifold();
           if (cancel) return;
           const next = buildProduct(product.slug, font, current, "preview");
           if (cancel) {
@@ -180,7 +181,7 @@ export function MakerStudio({ slug }: { slug: string }) {
     try {
       const font = needsFont ? await fonts.load(current.fontId) : null;
       await Promise.all([...current.charms.map((charm) => charm.id), current.housingLogo].map(ensureCharmArt));
-      if (active.slug === "model-clicker") await ensureManifold();
+      if (active.slug === "model-clicker" || active.slug === "bottle-case") await ensureManifold();
       const printModel = buildProduct(active.slug, font, current, "print");
       try {
         const file = await exportKeychain(
@@ -454,6 +455,9 @@ export function MakerStudio({ slug }: { slug: string }) {
             return (
               <HousingField key="housing" slug={slug} label={field.label} settings={settings} patch={patch} onError={setError} />
             );
+          }
+          if (field.type === "case-model") {
+            return <CaseModelField key="case-model" label={field.label} settings={settings} patch={patch} onError={setError} />;
           }
           if (field.type === "model") {
             return <ModelField key="model" slug={slug} label={field.label} settings={settings} patch={patch} onError={setError} />;
@@ -799,6 +803,7 @@ export function MakerStudio({ slug }: { slug: string }) {
           }
           if (field.type === "number") {
             if (field.key === "linkHeight" && settings.linkStyle === "block") return null;
+            if ((field.key === "lipWall" || field.key === "fitGap") && slug === "bottle-case" && settings.lipHeight === 0) return null;
             if (field.key === "holeDiameter" && slug === "clicker-keychain" && settings.loopStyle === "none") return null;
             if (
               (field.key === "linkSize" || field.key === "letterGap") &&
