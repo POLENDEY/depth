@@ -155,6 +155,8 @@ type ViewerProps = {
   onCutPick?: (tilt: number, turn: number, share: number, at: Pt3) => void;
   // The keyring loop dragged around the housing: which way it points (degrees).
   onLoopMove?: (angle: number) => void;
+  // A case's front text dragged: how far along the length and across it's moved (mm).
+  onTextMove?: (shift: number, across: number) => void;
   showDimensions?: boolean;
   // File name (without extension) for the exported PNG.
   exportName?: string;
@@ -176,6 +178,8 @@ type DragInfo = {
   onCutPick?: (tilt: number, turn: number, share: number, at: Pt3) => void;
   loop?: KeychainModel["loop"];
   onLoopMove?: (angle: number) => void;
+  textDrag?: KeychainModel["textDrag"];
+  onTextMove?: (shift: number, across: number) => void;
   onCutReadout?: (text: string | null) => void;
   cutTilt?: number;
   cutTurn?: number;
@@ -224,6 +228,7 @@ export function Viewer({
   onCutPiece,
   onCutPick,
   onLoopMove,
+  onTextMove,
   showDimensions = false,
   onToggleDimensions,
   exportName = "model",
@@ -304,13 +309,15 @@ export function Viewer({
       onCutPick,
       loop: model?.loop,
       onLoopMove,
+      textDrag: model?.textDrag,
+      onTextMove,
       onCutReadout: setCutReadout,
       cutTilt,
       cutTurn,
       cutShare,
       syncCut,
     };
-  }, [model, charms, onCharmMove, holeX, holeY, onHoleMove, onCutMove, onCutTransform, onCutPiece, onCutPick, onLoopMove, cutTilt, cutTurn, cutShare, syncCut]);
+  }, [model, charms, onCharmMove, holeX, holeY, onHoleMove, onCutMove, onCutTransform, onCutPiece, onCutPick, onLoopMove, onTextMove, cutTilt, cutTurn, cutShare, syncCut]);
   useEffect(() => {
     fillAngleRef.current = fillAngle;
     apiRef.current?.cutEditor.setFillAngle(fillAngle);
@@ -595,7 +602,9 @@ export function Viewer({
     const pointer = new THREE.Vector2();
     const drag = {
       active: false,
-      target: "charm" as "charm" | "hole" | "cut" | "loop",
+      target: "charm" as "charm" | "hole" | "cut" | "loop" | "text",
+      // Whether the dragged text is on a part shown turned over, so its length runs down.
+      flipped: false,
       charmIndex: -1,
       pointerId: -1,
       startLocal: new THREE.Vector3(),
@@ -786,13 +795,15 @@ export function Viewer({
       if (event.button !== 0 || event.shiftKey || event.altKey || event.ctrlKey || event.metaKey) return;
       const info = dragRef.current;
       if (fit.assembly) return;
-      if (!info.onCharmMove && !info.onHoleMove && !info.onCutMove && !info.onLoopMove) return;
+      if (!info.onCharmMove && !info.onHoleMove && !info.onCutMove && !info.onLoopMove && !info.onTextMove) return;
       setPointer(event);
       raycaster.setFromCamera(pointer, camera);
       const hit = raycaster.intersectObjects([textMesh, baseMesh], false)[0];
       if (!hit) return;
       const local = modelRoot.worldToLocal(hit.point.clone());
-      let target: "charm" | "hole" | "cut" | "loop" | null = null;
+      let target: "charm" | "hole" | "cut" | "loop" | "text" | null = null;
+      const textDrag = info.textDrag;
+      if (textDrag && info.onTextMove && hit.object === textMesh) target = "text";
       const hole = info.hole;
       if (hole && info.onHoleMove) {
         const reach = hole.radius + 1.8;
@@ -842,6 +853,11 @@ export function Viewer({
       const charm = info.charms[charmIndex];
       drag.startX = target === "hole" ? info.holeX : target === "cut" ? (cut?.mm ?? 0) : (charm?.x ?? 0);
       drag.startY = target === "hole" ? info.holeY : (charm?.y ?? 0);
+      if (target === "text" && textDrag) {
+        drag.startX = textDrag.shift;
+        drag.startY = textDrag.across;
+        drag.flipped = textDrag.flipFrom !== null && local.x > textDrag.flipFrom;
+      }
       const axis = target === "hole" ? hole?.axis : undefined;
       const normal = returnTurn(
         axis ? hole?.basis : undefined,
@@ -856,6 +872,8 @@ export function Viewer({
         if (facing.lengthSq() < 1e-6) facing.set(0, 1, 0);
         normal.copy(facing.normalize()).transformDirection(modelRoot.matrixWorld);
       }
+      // Text slides over the case's front, which faces -y.
+      if (target === "text") normal.set(0, 1, 0).transformDirection(modelRoot.matrixWorld);
       if (target === "loop" && loop) {
         // The loop slides around the housing's bottom, in the plane it lies in.
         normal.set(...loop.normal).transformDirection(modelRoot.matrixWorld);
@@ -888,6 +906,15 @@ export function Viewer({
       const dy = local.y - drag.startLocal.y;
       if (drag.target === "cut") {
         info.onCutMove?.(drag.startX + local.z - drag.startLocal.z);
+        return;
+      }
+      if (drag.target === "text") {
+        const up = local.z - drag.startLocal.z;
+        const round = (value: number) => Math.round(value * 2) / 2;
+        info.onTextMove?.(
+          round(Math.min(120, Math.max(-120, drag.startX + (drag.flipped ? -up : up)))),
+          round(Math.min(60, Math.max(-60, drag.startY + dx))),
+        );
         return;
       }
       if (drag.target === "loop" && info.loop) {

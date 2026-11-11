@@ -47,7 +47,13 @@ export type KeychainModel = {
   assembly?: ModelAssembly;
   cutEditor?: ModelCutEditor;
   loop?: ModelLoop;
+  textDrag?: TextDrag;
 };
+
+// Text on a case's front that can be dragged: how far it's moved along the length (`shift`)
+// and across (`across`, toward +x) in mm. Parts shown turned over (x past `flipFrom`) have
+// the length running down.
+export type TextDrag = { shift: number; across: number; flipFrom: number | null };
 
 // The keyring loop on a housing, for dragging it around: grabbed within `reach` of
 // `center`, it turns around `middle` in the plane facing `normal`, where `u` points to

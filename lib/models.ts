@@ -2801,10 +2801,41 @@ function bottleCase(font: Font | null, settings: ProductSettings, quality: MeshQ
     );
     const capCuts = [bore(capRadius, cut - 1, ceiling)];
     if (!flush) capCuts.push(keep(keep(lipOuter.offset(gap, "Round", 2, fine)).extrude(lip + gap + 1).translate(0, 0, cut - 1)));
-    const cap = keep(Manifold.difference([keep(body.trimByPlane([0, 0, 1], cut)), ...capCuts]));
+    const upper = keep(body.trimByPlane([0, 0, 1], cut));
+    // A keyring loop standing on the cap's top, its hole running front to back.
+    let loopRise = 0;
+    let capSolid = upper;
+    if (settings.caseLoop) {
+      const holeRadius = clamp(settings.caseLoopHole, 2, 10) / 2;
+      const outer = holeRadius + 2;
+      const top = keep(body.slice(box.max[2] - 0.3));
+      const topRect = top.bounds();
+      const thick = clamp((topRect.max[1] - topRect.min[1]) * 0.5, 3, 6);
+      const middle = holeRadius + 1.2;
+      const profile = keep(
+        keep(
+          CrossSection.union([
+            keep(CrossSection.circle(outer, fine).translate([0, middle])),
+            keep(CrossSection.square([outer * 2, middle + 3], false).translate([-outer, -3])),
+          ]),
+        ).subtract(keep(CrossSection.circle(holeRadius, fine).translate([0, middle]))),
+      );
+      const loop = keep(
+        keep(profile.extrude(thick).rotate([90, 0, 0])).translate(
+          (topRect.min[0] + topRect.max[0]) / 2,
+          (topRect.min[1] + topRect.max[1]) / 2 + thick / 2,
+          box.max[2],
+        ),
+      );
+      capSolid = keep(Manifold.union([upper, loop]));
+      loopRise = middle + outer;
+    }
+    const cap = keep(Manifold.difference([capSolid, ...capCuts]));
     if (housing.isEmpty() || cap.isEmpty()) throw new Error("Could not cut that model. Try another cut height.");
 
     // Raised text on the front, reading up the longer part: the letters' tops face -x.
+    const textShift = clamp(settings.caseTextShift, -120, 120);
+    const textAcross = clamp(settings.caseTextAcross, -60, 60);
     let raised: Solid | null = null;
     if (font && settings.text.trim()) {
       const layout = layoutText(font, settings.text, clamp(settings.letterHeight, 4, 40), quality, { maxChars: 18 });
@@ -2834,12 +2865,12 @@ function bottleCase(font: Font | null, settings: ProductSettings, quality: MeshQ
         keep(CrossSection.union(outlines)).translate([-(minX + maxX) / 2, -(minY + maxY) / 2]).scale(fit),
       );
       const thickness = clamp(settings.textThickness, 0.4, 3);
-      const middle = (onHousing ? cut / 2 : (cut + height) / 2) + settings.caseTextShift;
+      const middle = (onHousing ? cut / 2 : (cut + height) / 2) + textShift;
       // From the middle of the model out past its front by the text's thickness.
       const reach = cy - (box.min[1] - thickness - 1);
       const place = new THREE.Matrix4()
         .makeBasis(new THREE.Vector3(0, 0, 1), new THREE.Vector3(-1, 0, 0), new THREE.Vector3(0, -1, 0))
-        .setPosition(cx, cy, middle);
+        .setPosition(cx + textAcross, cy, middle);
       const prism = keep(keep(letters.extrude(reach)).transform(place.elements as Parameters<Solid["transform"]>[0]));
       raised = keep(Manifold.difference([keep(prism.intersect(keep(body.translate(0, -thickness, 0)))), body]));
       if (raised.isEmpty()) {
@@ -2853,17 +2884,24 @@ function bottleCase(font: Font | null, settings: ProductSettings, quality: MeshQ
       }
     }
 
-    // Closed in the preview when asked; otherwise side by side, the cap turned over onto its top.
+    // Closed in the preview when asked; otherwise side by side, the cap turned over onto its top,
+    // or standing on its cut with the loop up when it has one.
     const housingBox = housing.boundingBox();
     const capBox = cap.boundingBox();
-    const capPose =
-      preview && settings.caseAssembled
+    const assembled = preview && settings.caseAssembled;
+    const flipped = !assembled && !settings.caseLoop;
+    const capX = housingBox.max[0] + 8 - capBox.min[0];
+    const capPose = assembled
+      ? new THREE.Matrix4()
+      : flipped
         ? new THREE.Matrix4()
-        : new THREE.Matrix4()
-            .makeTranslation(housingBox.max[0] + 8 - capBox.min[0], capBox.min[1] + capBox.max[1], height)
-            .multiply(new THREE.Matrix4().makeRotationX(Math.PI));
+            .makeTranslation(capX, capBox.min[1] + capBox.max[1], height)
+            .multiply(new THREE.Matrix4().makeRotationX(Math.PI))
+        : new THREE.Matrix4().makeTranslation(capX, 0, -cut);
     const plain = (part: Solid) => plainGeometry(solidPositions(part));
     const base = fuse([plain(housing), plain(cap).applyMatrix4(capPose)]);
+    base.computeBoundingBox();
+    const startX = base.boundingBox!.min.x;
     const textParts: THREE.BufferGeometry[] = [];
     if (raised) {
       const below = keep(raised.trimByPlane([0, 0, -1], -cut));
@@ -2879,12 +2917,22 @@ function bottleCase(font: Font | null, settings: ProductSettings, quality: MeshQ
     const joint = flush
       ? "The faces meet flush with no lip, so the cap stays on by gripping the bottle's top: make the cap's inside diameter about 0.2 mm bigger than it."
       : `The housing's ${lip} mm lip slides into the cap with a ${gap} mm fit gap: make the gap bigger if it's too tight.`;
+    const capPrint = settings.caseLoop
+      ? "the cap standing on its cut with the loop up (its inside ceiling prints as a short bridge)"
+      : `the cap on its top, so both open upward with no supports inside${flatTop ? "" : " (the cap's rounded top needs supports under it)"}`;
     problems.push(
-      `Housing ${cut} mm + cap ${(height - cut).toFixed(1)} mm = ${height.toFixed(1)} mm tall closed. It holds a bottle up to ${(housingRadius * 2).toFixed(1)} mm wide and ${longest.toFixed(1)} mm long, with the top ${(capRadius * 2).toFixed(1)} mm wide in the cap. ${joint} Print the housing standing on its bottom and the cap on its top, so both open upward with no supports inside${
-        flatTop ? "" : " (the cap's rounded top needs supports under it)"
-      }.`,
+      `Housing ${cut} mm + cap ${(height - cut).toFixed(1)} mm = ${height.toFixed(1)} mm tall closed${
+        loopRise ? `, plus ${loopRise.toFixed(1)} mm of keyring loop` : ""
+      }. It holds a bottle up to ${(housingRadius * 2).toFixed(1)} mm wide and ${longest.toFixed(1)} mm long, with the top ${(capRadius * 2).toFixed(1)} mm wide in the cap. ${joint} Print the housing standing on its bottom and ${capPrint}.`,
     );
-    return pack(text, base, problems);
+    const built = pack(text, base, problems);
+    const moved = built.base.boundingBox!.min.x - startX;
+    built.textDrag = {
+      shift: textShift,
+      across: textAcross,
+      flipFrom: flipped ? housingBox.max[0] + 4 + moved : null,
+    };
+    return built;
   } finally {
     for (const item of temps) item.delete();
   }

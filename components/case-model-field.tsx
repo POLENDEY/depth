@@ -70,6 +70,18 @@ export function CaseModelField({ label, settings, patch, onError }: Props) {
         flush faces with no step.
       </span>
       <label className="mt-3 flex items-center justify-between gap-2">
+        <span>Keyring loop</span>
+        <input
+          type="checkbox"
+          checked={settings.caseLoop}
+          onChange={(event) => patch({ caseLoop: event.target.checked })}
+          className="h-4 w-4 accent-blue-600"
+        />
+      </label>
+      <span className="block text-xs text-zinc-400">
+        A loop on top of the cap for a keyring. The cap then prints standing on its cut with the loop up.
+      </span>
+      <label className="mt-3 flex items-center justify-between gap-2">
         <span>Preview closed</span>
         <input
           type="checkbox"

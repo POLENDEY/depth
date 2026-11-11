@@ -164,9 +164,13 @@ export type ProductSettings = {
   lipHeight: number;
   lipWall: number;
   fitGap: number;
-  // How far the side text moves up from its spot (mm), and whether the preview shows the
-  // case closed instead of laid out for printing.
+  // Whether the cap has a keyring loop on top and its hole (mm).
+  caseLoop: boolean;
+  caseLoopHole: number;
+  // How far the side text moves up and across from its spot (mm), and whether the preview
+  // shows the case closed instead of laid out for printing.
   caseTextShift: number;
+  caseTextAcross: number;
   caseAssembled: boolean;
   charms: CharmPlacement[];
   charmBase: number;
@@ -260,7 +264,10 @@ const shared = {
   lipHeight: 5,
   lipWall: 1.2,
   fitGap: 0.2,
+  caseLoop: true,
+  caseLoopHole: 5,
   caseTextShift: 0,
+  caseTextAcross: 0,
   caseAssembled: false,
   charms: [] as CharmPlacement[],
   charmBase: 1.2,
@@ -518,11 +525,13 @@ export const PRODUCTS: Product[] = [
       { type: "number", key: "lipHeight", label: "Lip height", min: 0, max: 15, step: 0.5 },
       { type: "number", key: "lipWall", label: "Wall outside the lip", min: 0.8, max: 5, step: 0.1 },
       { type: "number", key: "fitGap", label: "Lip fit gap", min: 0.05, max: 0.8, step: 0.05 },
+      { type: "number", key: "caseLoopHole", label: "Keyring hole", min: 2, max: 10, step: 0.5 },
       { type: "text", label: "Text", maxChars: 18, optional: true },
       { type: "font" },
       { type: "number", key: "letterHeight", label: "Letter height", min: 4, max: 40, step: 0.5 },
       { type: "number", key: "textThickness", label: "Text thickness", min: 0.4, max: 3, step: 0.1 },
-      { type: "number", key: "caseTextShift", label: "Text position", min: -120, max: 120, step: 0.5 },
+      { type: "number", key: "caseTextShift", label: "Text up / down", min: -120, max: 120, step: 0.5 },
+      { type: "number", key: "caseTextAcross", label: "Text left / right", min: -60, max: 60, step: 0.5 },
       { type: "colors", text: "Text", base: "Case" },
     ],
   },

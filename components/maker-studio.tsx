@@ -292,6 +292,9 @@ export function MakerStudio({ slug }: { slug: string }) {
                 : undefined
             }
             onLoopMove={isModel && visible?.loop ? (angle) => patch({ loopAngle: angle }) : undefined}
+            onTextMove={
+              visible?.textDrag ? (shift, across) => patch({ caseTextShift: shift, caseTextAcross: across }) : undefined
+            }
             onCutPick={
               isModel
                 ? (tilt, turn, share, at) =>
@@ -308,6 +311,8 @@ export function MakerStudio({ slug }: { slug: string }) {
               <p className="text-xs text-zinc-400">
                 {slug === "magnet" && settings.charms.length
                   ? "Drag an emoji to move it · Drag empty space to orbit"
+                  : visible?.textDrag && settings.text.trim()
+                  ? "Drag the text to move it · Drag empty space to orbit"
                   : isModel
                   ? `${dragHint([visible?.cut ? "the cut" : null, visible?.hole?.axis ? "the ring hole" : null, visible?.loop ? "the keyring tab" : null])}Edit cut to turn it or pick pieces`
                   : "Drag to orbit · Shift+drag to pan · Scroll to zoom"}
@@ -804,6 +809,7 @@ export function MakerStudio({ slug }: { slug: string }) {
           if (field.type === "number") {
             if (field.key === "linkHeight" && settings.linkStyle === "block") return null;
             if ((field.key === "lipWall" || field.key === "fitGap") && slug === "bottle-case" && settings.lipHeight === 0) return null;
+            if (field.key === "caseLoopHole" && !settings.caseLoop) return null;
             if (field.key === "holeDiameter" && slug === "clicker-keychain" && settings.loopStyle === "none") return null;
             if (
               (field.key === "linkSize" || field.key === "letterGap") &&
